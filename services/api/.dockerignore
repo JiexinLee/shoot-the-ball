@@ -1,0 +1,9 @@
+node_modules
+dist
+pnpm-lock.yaml.bak
+.vscode
+.idea
+.env*
+!.env.example
+prisma/migrations/**/migration.sql.tmp
+coverage

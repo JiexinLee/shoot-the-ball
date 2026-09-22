@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule: { interval: weekly }
+    groups:
+      pnpm:
+        patterns: ["*"]
+    open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: pip
+    directory: "/services/ai-worker"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 10
+  - package-ecosystem: docker
+    directory: "/services/api"
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: "/services/ai-worker"
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }

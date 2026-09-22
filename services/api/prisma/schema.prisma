@@ -1,0 +1,220 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum VideoStatus {
+  UPLOADING
+  UPLOADED
+  PROCESSING
+  PROCESSED
+  FAILED
+  ARCHIVED
+}
+
+enum ProcessingJobStatus {
+  UPLOADED
+  PREPARING
+  DETECTING
+  VERIFYING
+  GENERATING_CLIPS
+  READY
+  EXPORTING
+  EXPORTED
+  FAILED
+}
+
+enum HighlightType {
+  MADE_BASKET
+  THREE_POINTER
+  ASSIST
+  STEAL
+  BLOCK
+  REBOUND
+  OTHER
+}
+
+enum HighlightUserStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ExportType {
+  INDIVIDUAL
+  MERGE
+}
+
+enum ExportFormat {
+  MP4_HD
+  MP4_FULL_HD
+  MP4_4K
+}
+
+enum ExportStatus {
+  QUEUED
+  EXPORTING
+  EXPORTED
+  FAILED
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String
+  name          String
+  avatarUrl     String?
+  role          UserRole  @default(USER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  projects      Project[]
+  videos        Video[]
+  processingJobs ProcessingJob[]
+  exports       Export[]
+
+  @@index([email])
+}
+
+model Project {
+  id            String    @id @default(cuid())
+  userId        String
+  name          String
+  coverUrl      String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videos        Video[]
+  exports       Export[]
+  processingJobs ProcessingJob[]
+
+  @@index([userId, createdAt])
+}
+
+model Video {
+  id            String    @id @default(cuid())
+  projectId     String
+  userId        String
+  title         String
+  filename      String
+  storageKey    String
+  contentType   String
+  sizeBytes     BigInt
+  duration      Float?
+  width         Int?
+  height        Int?
+  fps           Float?
+  status        VideoStatus @default(UPLOADING)
+  sourceUrl     String?
+  calibration   Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  highlights    Highlight[]
+  processingJob ProcessingJob?
+
+  @@index([projectId, createdAt])
+  @@index([userId, status])
+}
+
+model ProcessingJob {
+  id              String    @id @default(cuid())
+  videoId         String    @unique
+  projectId       String
+  userId          String
+  status          ProcessingJobStatus @default(UPLOADED)
+  stage           String?
+  progress        Float     @default(0)
+  errorMessage    String?
+  pipelineVersion String?
+  modelVersion    String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  video           Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([status, updatedAt])
+  @@index([userId, projectId])
+}
+
+model Highlight {
+  id            String    @id @default(cuid())
+  videoId       String
+  startTime     Float
+  endTime       Float
+  eventTime     Float
+  confidence    Float
+  type          HighlightType @default(MADE_BASKET)
+  clipUrl       String?
+  clipStorageKey String?
+  thumbnailUrl  String?
+  metadata      Json?
+  userStatus    HighlightUserStatus @default(PENDING)
+  selected      Boolean   @default(true)
+  deleted       Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  video         Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  exportItems   ExportItem[]
+
+  @@index([videoId, eventTime])
+  @@index([videoId, deleted])
+}
+
+model Export {
+  id              String    @id @default(cuid())
+  projectId       String
+  userId          String
+  type            ExportType
+  format          ExportFormat @default(MP4_FULL_HD)
+  status          ExportStatus @default(QUEUED)
+  storageKey      String?
+  downloadUrl     String?
+  sizeBytes       BigInt?
+  duration        Float?
+  errorMessage    String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  exportItems     ExportItem[]
+
+  @@index([projectId, status])
+  @@index([userId, createdAt])
+}
+
+model ExportItem {
+  id            String    @id @default(cuid())
+  exportId      String
+  highlightId   String
+  orderIndex    Int
+  startTime     Float
+  endTime       Float
+  createdAt     DateTime  @default(now())
+
+  export        Export    @relation(fields: [exportId], references: [id], onDelete: Cascade)
+  highlight     Highlight @relation(fields: [highlightId], references: [id], onDelete: Cascade)
+
+  @@index([exportId, orderIndex])
+}

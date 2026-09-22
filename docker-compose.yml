@@ -1,0 +1,4 @@
+name: shoot-the-ball-infra
+
+include:
+  - path: infra/compose/dev-infra.yml

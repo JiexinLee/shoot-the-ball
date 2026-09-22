@@ -1,0 +1,16 @@
+# shoot-the-ball API service
+services:
+  api:
+    image: shoot-the-ball-api:latest
+    build:
+      context: ../../services/api
+    environment:
+      - DATABASE_URL
+      - DIRECT_DATABASE_URL
+      - REDIS_URL
+      - JWT_SECRET
+      - STORAGE_ENDPOINT
+      - STORAGE_ACCESS_KEY_ID
+      - STORAGE_SECRET_ACCESS_KEY
+    ports:
+      - "4000:4000"

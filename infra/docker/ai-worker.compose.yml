@@ -1,0 +1,20 @@
+# shoot-the-ball AI worker
+services:
+  ai-worker:
+    image: shoot-the-ball-ai-worker:latest
+    build:
+      context: ../../services/ai-worker
+    environment:
+      - REDIS_URL
+      - API_BASE_URL
+      - STORAGE_ENDPOINT
+      - STORAGE_ACCESS_KEY_ID
+      - STORAGE_SECRET_ACCESS_KEY
+    deploy:
+      replicas: 1
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

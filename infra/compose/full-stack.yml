@@ -1,0 +1,77 @@
+name: shoot-the-ball-full
+include:
+  - path: infra/compose/dev-infra.yml
+services:
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      API_HOST: 0.0.0.0
+      API_PORT: 4000
+      API_PREFIX: /v1
+      API_CORS_ORIGIN: "*"
+      JWT_SECRET: "dev-only-secret-change-in-production"
+      DATABASE_URL: "postgresql://shoot_the_ball:shoot_the_ball_dev_password@postgres:5432/shoot_the_ball?sslmode=disable"
+      DIRECT_DATABASE_URL: "postgresql://shoot_the_ball:shoot_the_ball_dev_password@postgres:5432/shoot_the_ball?sslmode=disable"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_URL: "redis://redis:6379/0"
+      STORAGE_PROVIDER: s3
+      STORAGE_ENDPOINT: "http://minio:9000"
+      STORAGE_REGION: us-east-1
+      STORAGE_ACCESS_KEY_ID: minio_admin
+      STORAGE_SECRET_ACCESS_KEY: minio_dev_password
+      STORAGE_BUCKET_SOURCE: shoot-the-ball-source
+      STORAGE_BUCKET_EXPORTS: shoot-the-ball-exports
+    ports:
+      - "4000:4000"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cd /app
+        node_modules/.bin/prisma migrate deploy || true
+        node dist/main.js
+
+  ai-worker:
+    build:
+      context: ./services/ai-worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: "redis://redis:6379/0"
+      API_BASE_URL: "http://api:4000/v1"
+      STORAGE_PROVIDER: s3
+      STORAGE_ENDPOINT: "http://minio:9000"
+      STORAGE_REGION: us-east-1
+      STORAGE_ACCESS_KEY_ID: minio_admin
+      STORAGE_SECRET_ACCESS_KEY: minio_dev_password
+      STORAGE_BUCKET_SOURCE: shoot-the-ball-source
+      STORAGE_BUCKET_EXPORTS: shoot-the-ball-exports
+      AI_WORKER_MODE: all
+    volumes:
+      - ai_worker_tmp:/tmp/shoot-the-ball
+
+volumes:
+  ai_worker_tmp:
+    driver: local

@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-lint-and-test:
+    name: API · Lint + Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: shoot_the_ball_ci
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d shoot_the_ball_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install root
+        run: pnpm install --frozen-lockfile
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      - name: Install API deps
+        working-directory: services/api
+        run: pnpm install --frozen-lockfile
+      - name: Build contracts
+        run: pnpm --filter @shoot-the-ball/contracts build
+      - name: Prisma generate + migrate
+        working-directory: services/api
+        env:
+          DATABASE_URL: postgresql://ci:ci_password@localhost:5432/shoot_the_ball_ci?sslmode=disable
+          DIRECT_DATABASE_URL: postgresql://ci:ci_password@localhost:5432/shoot_the_ball_ci?sslmode=disable
+          JWT_SECRET: ci_test_secret
+        run: |
+          pnpm db:generate
+          pnpm db:migrate:prod
+      - name: Lint API
+        working-directory: services/api
+        run: pnpm lint
+      - name: Build API
+        working-directory: services/api
+        run: pnpm build
+      - name: Test API
+        working-directory: services/api
+        env:
+          DATABASE_URL: postgresql://ci:ci_password@localhost:5432/shoot_the_ball_ci?sslmode=disable
+          DIRECT_DATABASE_URL: postgresql://ci:ci_password@localhost:5432/shoot_the_ball_ci?sslmode=disable
+          JWT_SECRET: ci_test_secret
+          REDIS_URL: redis://localhost:6379/0
+        run: pnpm test -- --coverage
+
+  ai-worker-lint-and-test:
+    name: AI Worker · Lint + Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install poetry
+        run: curl -sSL https://install.python-poetry.org | python3 -
+      - name: Install deps
+        working-directory: services/ai-worker
+        run: poetry install --no-interaction --no-root
+      - name: Ruff check
+        working-directory: services/ai-worker
+        run: poetry run ruff check app tests
+      - name: Test AI worker
+        working-directory: services/ai-worker
+        run: poetry run pytest -q --cov=app
