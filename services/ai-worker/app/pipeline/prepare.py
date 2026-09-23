@@ -38,6 +38,19 @@ def _download_source(storage_key: str, dest: Path) -> None:
 def prepare_source(ctx: PipelineContext) -> None:
     tmp = _ensure_tmp_dir(ctx.video_id)
     local_path = tmp / "source.mp4"
+
+    if ctx.metadata.path and Path(ctx.metadata.path).exists():
+        src = Path(ctx.metadata.path)
+        if not local_path.exists() or local_path.resolve() != src.resolve():
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if local_path.exists() or local_path.is_symlink():
+                    local_path.unlink()
+                local_path.symlink_to(src)
+            except OSError:
+                import shutil
+                shutil.copy2(src, local_path)
+
     metadata = VideoMetadata(path=str(local_path))
 
     try:

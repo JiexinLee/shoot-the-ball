@@ -20,7 +20,7 @@ logger.add(
     level="INFO",
     rotation="1 day",
     retention="30 days",
-    compression="gzip",
+    compression="gz",
     enqueue=True,
 )
 

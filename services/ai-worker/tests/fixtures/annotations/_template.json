@@ -1,0 +1,10 @@
+{
+  "_comment": "Template ground-truth annotation file. Copy, rename to match your fixture video filename, then fill made_baskets.",
+  "video": "real_1min_hoop_view.mp4",
+  "duration_sec": 62.3,
+  "made_baskets": [
+    { "event_time_sec": 12.40, "type": "MADE_BASKET", "notes": "left wing 3pt" },
+    { "event_time_sec": 48.10, "type": "THREE_POINTER", "notes": "top of key" }
+  ],
+  "tolerance_sec": 1.5
+}

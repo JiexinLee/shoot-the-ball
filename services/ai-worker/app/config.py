@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     ai_fine_fps: float = 8.0
     ai_confidence_threshold: float = 0.55
 
+    ai_demo_mode: bool = False
+    ai_demo_highlight_count: int = 0
+    ai_demo_seed: int = 20260922
+
 
 @lru_cache
 def get_settings() -> Settings:
