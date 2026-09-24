@@ -1,7 +1,6 @@
-import { Job } from 'bullmq';
-import { prisma } from '../db/prisma';
-import { logger } from '../config/logger';
-import { Prisma } from '@prisma/client';
+import type { Queue } from "bullmq";
+import { prisma } from "../db/prisma";
+import { logger } from "../config/logger";
 
 export interface ProcessingJobPayload {
   videoId: string;
@@ -16,18 +15,28 @@ export interface ExportJobPayload {
 }
 
 export async function enqueueProcessingJob(
-  queue: import('bullmq').Queue,
+  queue: Queue,
   payload: ProcessingJobPayload,
 ): Promise<string> {
   const existingJob = await prisma.processingJob.findFirst({
     where: {
       videoId: payload.videoId,
-      status: { in: ['UPLOADED', 'PREPARING', 'DETECTING', 'VERIFYING', 'GENERATING_CLIPS'] },
+      status: {
+        in: [
+          "UPLOADED",
+          "PREPARING",
+          "DETECTING",
+          "VERIFYING",
+          "GENERATING_CLIPS",
+        ],
+      },
     },
   });
 
   if (existingJob) {
-    logger.info(`Reusing existing processing job ${existingJob.id} for video ${payload.videoId}`);
+    logger.info(
+      `Reusing existing processing job ${existingJob.id} for video ${payload.videoId}`,
+    );
     return existingJob.id;
   }
 
@@ -36,39 +45,49 @@ export async function enqueueProcessingJob(
       videoId: payload.videoId,
       projectId: payload.projectId,
       userId: payload.userId,
-      status: 'UPLOADED',
+      status: "UPLOADED",
       progress: 0,
       errorMessage: null,
     },
   });
 
-  await queue.add('process-video', payload, {
+  await queue.add("process-video", payload, {
     jobId: jobRecord.id,
   });
 
-  logger.info(`Enqueued processing job ${jobRecord.id} for video ${payload.videoId}`);
+  logger.info(
+    `Enqueued processing job ${jobRecord.id} for video ${payload.videoId}`,
+  );
   return jobRecord.id;
 }
 
 export async function enqueueExportJob(
-  queue: import('bullmq').Queue,
+  queue: Queue,
   payload: ExportJobPayload,
 ): Promise<void> {
-  await queue.add('export-video', payload, {
+  await queue.add("export-video", payload, {
     jobId: payload.exportId,
   });
   logger.info(`Enqueued export job ${payload.exportId}`);
 }
 
 export async function updateJobProgress(
-  jobId: string,
-  stage: string,
+  jobId: string | undefined | null,
+  stage: string | undefined | null,
   progress: number,
-  errorMessage?: string,
+  errorMessage?: string | undefined | null,
 ): Promise<void> {
-  const data: Prisma.ProcessingJobUpdateInput = {
+  if (!jobId) {
+    throw new Error("updateJobProgress: jobId is required");
+  }
+  const data: {
+    progress: number;
+    stage: string;
+    updatedAt: Date;
+    errorMessage?: string;
+  } = {
     progress,
-    stage,
+    stage: stage || "Preparing",
     updatedAt: new Date(),
   };
   if (errorMessage) {
@@ -76,24 +95,41 @@ export async function updateJobProgress(
   }
   await prisma.processingJob.update({
     where: { id: jobId },
-    data,
+    data: data as never,
   });
 }
 
 export async function updateJobStatus(
-  jobId: string,
-  status: string,
-  extra?: { progress?: number; errorMessage?: string; stage?: string },
+  jobId: string | undefined | null,
+  status: string | undefined | null,
+  extra?: {
+    progress?: number | null;
+    errorMessage?: string | null;
+    stage?: string | null;
+  },
 ): Promise<void> {
-  const data: Prisma.ProcessingJobUpdateInput = {
+  if (!jobId) {
+    throw new Error("updateJobStatus: jobId is required");
+  }
+  if (!status) {
+    throw new Error("updateJobStatus: status is required");
+  }
+  const data: {
+    status: string;
+    updatedAt: Date;
+    progress?: number;
+    errorMessage?: string;
+    stage?: string;
+  } = {
     status,
     updatedAt: new Date(),
   };
-  if (extra?.progress !== undefined) data.progress = extra.progress;
-  if (extra?.errorMessage !== undefined) data.errorMessage = extra.errorMessage;
-  if (extra?.stage !== undefined) data.stage = extra.stage;
+  if (extra?.progress !== undefined && extra.progress !== null)
+    data.progress = extra.progress;
+  if (extra?.errorMessage) data.errorMessage = extra.errorMessage;
+  if (extra?.stage) data.stage = extra.stage;
   await prisma.processingJob.update({
     where: { id: jobId },
-    data,
+    data: data as never,
   });
 }

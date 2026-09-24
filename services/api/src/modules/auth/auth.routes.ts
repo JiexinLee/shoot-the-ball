@@ -1,4 +1,5 @@
-import { Router, Request, Response } from 'express';
+import type { Request, Response } from 'express';
+import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../db/prisma';
 import { signToken } from './jwt';
@@ -69,7 +70,7 @@ authRouter.post('/login', async (req: Request, res: Response) => {
   });
 });
 
-authRouter.get('/me', requireAuth, async (req: Request, res: Response) => {
+authRouter.get('/me', requireAuth, (req: Request, res: Response) => {
   if (!req.currentUser) {
     res.status(401).json({ error: 'Unauthorized' });
     return;

@@ -18,10 +18,20 @@ from app.logging_setup import logger
 from app.pipeline.pipeline import HighlightPipeline
 from app.types import HighlightCandidate, PipelineContext
 
+# ==========================================================================
+# 模块级单例：加载环境变量 / 配置
+# ==========================================================================
 settings = get_settings()
 
 
 def _redis_conn() -> redis.Redis:
+    """
+    【基础设施】根据配置建立 Redis 连接。
+    - 如果有 REDIS_URL 就直接用 URL 连（线上常见方式）
+    - 否则拆成 host/port/password/db 单独连（本地开发用）
+    这里 Redis 是 Worker ↔ API 之间的"消息队列"的底层存储。
+    API 侧用 BullMQ 写任务，Python 侧用 RQ 取任务（协议兼容同一条 Redis stream）。
+    """
     if settings.redis_url:
         return redis.Redis.from_url(settings.redis_url)
     return redis.Redis(
@@ -34,6 +44,16 @@ def _redis_conn() -> redis.Redis:
 
 def _update_api_job(job_id: str, status: str, progress: float, stage: str | None = None,
                     error_message: str | None = None) -> None:
+    """
+    【基础设施】把当前任务进度/状态 HTTP PATCH 回 Node.js API，
+    这样前端用户就能看到"15% / 正在检测"这种进度条。
+    失败只记 warning，不中断主流程（因为 API 挂了也不应该影响视频本身的处理）。
+
+    调用方的典型状态机：
+      PREPARING (0-5%) → DETECTING (5-55%) → VERIFYING (55-85%)
+      → GENERATING_CLIPS (85-95%) → READY (100%)
+      任何阶段抛异常 → FAILED
+    """
     payload = {
         "status": status,
         "progress": progress,
@@ -57,6 +77,20 @@ def _update_api_job(job_id: str, status: str, progress: float, stage: str | None
 
 
 def process_video(video_id: str, project_id: str, user_id: str) -> dict:
+    """
+    【Worker 消费函数 - 视频处理任务】
+    这是队列里 video-processing 任务真正被消费时调用的函数。
+    BullMQ 那边入队时塞的 payload 格式是：
+      { videoId, projectId, userId }，对应这里三个位置参数。
+
+    完整步骤：
+    1. 从 RQ 当前 job 拿 job_id（或本地 fallback 时间戳）
+    2. 构建 PipelineContext（贯穿整个 pipeline 的上下文数据袋）
+    3. 报告 PREPARING → 跑 HighlightPipeline（里面含 prepare/coarse/fine/generate 4 个 stage）
+    4. 报告 GENERATING_CLIPS → 把 ctx.highlights 批量 POST 回 API 的 /videos/:id/highlights/bulk
+    5. 报告 READY → 返回结果给 RQ（存在 Redis 里供外部查询）
+    6. 任何异常：记错误日志 + 回写 FAILED 状态 + 重新抛出（RQ 会按策略重试）
+    """
     job = get_current_job()
     job_id = job.id if job else f"local-{int(time.time())}"
     logger.info(f"[{job_id}] process_video start video_id={video_id} project={project_id}")
@@ -107,6 +141,19 @@ def process_video(video_id: str, project_id: str, user_id: str) -> dict:
 
 def export_highlights(export_id: str, project_id: str, user_id: str,
                       items: list[dict], type_name: str, format_name: str) -> dict:
+    """
+    【Worker 消费函数 - 导出任务】
+    这是队列里 video-export 任务真正被消费时调用的函数。
+    负责把前端用户选好的若干 highlight（item = {start_time, end_time}）
+    按用户指定的格式（MP4_HD / MP4_FULL_HD / MP4_4K）和类型：
+      - SINGLE：单 clip 直接导出
+      - MERGE：多个 clip 合成一个集锦 mp4
+
+    注意：当前这版 source_path = tmp/source.mp4 还是 TODO，
+    没有从 S3 下原视频（真实线上需要先从 storage 下载到本地）。
+    本地跑脚本的话可以用 tests/scripts/export_local_highlights.py，
+    它直接从用户指定的本地视频去切，不依赖 S3 下载。
+    """
     job = get_current_job()
     job_id = job.id if job else f"local-export-{int(time.time())}"
     logger.info(f"[{job_id}] export_highlights export_id={export_id} items={len(items)} type={type_name}")
@@ -151,6 +198,24 @@ def export_highlights(export_id: str, project_id: str, user_id: str,
 
 
 def main() -> None:
+    """
+    【Worker 入口】
+    运行模式分 3 种：
+
+    A. 本地调试模式（--local-video）
+       不走 Redis/RQ，直接在当前进程内跑 pipeline 并把 highlights JSON 打印到 stdout。
+       常用于：
+         - 快速测 detector/pipeline 效果（比如 benchmark.py 就是调这个）
+         - 跟 tests/scripts/export_local_highlights.py 搭配做端到端剪辑测试
+
+    B. 队列常驻模式（默认，不带 --once）
+       连 Redis，监听 BULLMQ_PROCESSING_QUEUE + BULLMQ_EXPORT_QUEUE 两条队列（可通过
+       AI_WORKER_MODE=processing|export|all 过滤）。
+       收到任务就调用 process_video() 或 export_highlights()，一直阻塞到收到 SIGINT/SIGTERM。
+
+    C. 队列单次模式（--once）
+       跟 B 一样连队列，但处理完 1 条就退出（burst=True），一般给 CI/脚本调度用。
+    """
     parser = argparse.ArgumentParser(prog="stb-worker", description="Shoot The Ball AI Worker")
     parser.add_argument("--once", action="store_true", help="Run one job and exit")
     parser.add_argument("--local-video", help="Dev: run pipeline on a local video path")
@@ -159,6 +224,7 @@ def main() -> None:
     parser.add_argument("--user-id", default="dev-user", help="Dev: override user id")
     args = parser.parse_args()
 
+    # ================ 模式 A：本地调试，直接跑 pipeline ================
     if args.local_video:
         logger.info(f"Running local pipeline on {args.local_video}")
         ctx = PipelineContext(
@@ -195,6 +261,7 @@ def main() -> None:
         print(json.dumps(out, indent=2))
         return
 
+    # ================ 模式 B/C：走 RQ Worker 消费队列 ================
     conn = _redis_conn()
     queues: list[Queue] = []
     if settings.ai_worker_mode in ("all", "processing"):
@@ -210,6 +277,7 @@ def main() -> None:
     worker = Worker(queues=[q.name for q in queues], connection=conn)
 
     def _shutdown(sig, frame):  # noqa: ARG001
+        """收到 Ctrl+C 或 docker stop 时，把当前任务做完再干净退出。"""
         logger.info(f"Signal {sig} received, shutting down worker")
         worker.stop()
         sys.exit(0)

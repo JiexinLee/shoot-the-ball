@@ -1,33 +1,38 @@
-import { Router, Request, Response } from 'express';
-import { z } from 'zod';
-import { prisma } from '../../db/prisma';
-import { requireAuth } from '../auth/auth.middleware';
-import { createExportQueue, enqueueExportJob } from '../../jobs/queue';
+import type { Request, Response } from "express";
+import { Router } from "express";
+import { z } from "zod";
+import { prisma } from "../../db/prisma";
+import { requireAuth } from "../auth/auth.middleware";
+import { enqueueExportJob } from "../../jobs/queue";
 
 export const exportsRouter = Router();
 exportsRouter.use(requireAuth);
 
 const createExportSchema = z.object({
   projectId: z.string().min(1),
-  type: z.enum(['INDIVIDUAL', 'MERGE']),
-  format: z.enum(['MP4_HD', 'MP4_FULL_HD', 'MP4_4K']).default('MP4_FULL_HD'),
+  type: z.enum(["INDIVIDUAL", "MERGE"]),
+  format: z.enum(["MP4_HD", "MP4_FULL_HD", "MP4_4K"]).default("MP4_FULL_HD"),
   highlightIds: z.array(z.string().min(1)).nonempty(),
 });
 
-exportsRouter.post('/', async (req: Request, res: Response) => {
+exportsRouter.post("/", async (req: Request, res: Response) => {
   const userId = req.currentUser!.id;
   const parsed = createExportSchema.safeParse(req.body);
 
   if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid input', details: parsed.error.flatten() });
+    res
+      .status(400)
+      .json({ error: "Invalid input", details: parsed.error.flatten() });
     return;
   }
 
   const { projectId, type, format, highlightIds } = parsed.data;
 
-  const project = await prisma.project.findFirst({ where: { id: projectId, userId } });
+  const project = await prisma.project.findFirst({
+    where: { id: projectId, userId },
+  });
   if (!project) {
-    res.status(404).json({ error: 'Project not found' });
+    res.status(404).json({ error: "Project not found" });
     return;
   }
 
@@ -37,11 +42,11 @@ exportsRouter.post('/', async (req: Request, res: Response) => {
       video: { projectId, userId },
       deleted: false,
     },
-    orderBy: { eventTime: 'asc' },
+    orderBy: { eventTime: "asc" },
   });
 
   if (highlights.length !== highlightIds.length) {
-    res.status(400).json({ error: 'Some highlights not found' });
+    res.status(400).json({ error: "Some highlights not found" });
     return;
   }
 
@@ -51,34 +56,38 @@ exportsRouter.post('/', async (req: Request, res: Response) => {
       userId,
       type,
       format,
-      status: 'QUEUED',
+      status: "QUEUED",
       exportItems: {
-        create: highlights.map((h, idx) => ({
-          highlightId: h.id,
-          orderIndex: idx,
-          startTime: h.startTime,
-          endTime: h.endTime,
-        })),
+        create: highlights.map(
+          (
+            h: { id: string; startTime: number; endTime: number },
+            idx: number,
+          ) => ({
+            highlightId: h.id,
+            orderIndex: idx,
+            startTime: h.startTime,
+            endTime: h.endTime,
+          }),
+        ),
       },
     },
     include: { exportItems: true },
   });
 
-  const queue = createExportQueue();
   try {
-    await enqueueExportJob(queue, {
+    await enqueueExportJob({
       exportId: exportRecord.id,
       projectId,
       userId,
     });
-  } finally {
-    await queue.close();
+  } catch {
+    // queue 关闭是 enqueueExportJob 内部自己做的
   }
 
   res.status(202).json({ export: exportRecord });
 });
 
-exportsRouter.get('/:id', async (req: Request, res: Response) => {
+exportsRouter.get("/:id", async (req: Request, res: Response) => {
   const userId = req.currentUser!.id;
   const { id } = req.params;
 
@@ -88,12 +97,12 @@ exportsRouter.get('/:id', async (req: Request, res: Response) => {
   });
 
   if (!exportRecord) {
-    res.status(404).json({ error: 'Export not found' });
+    res.status(404).json({ error: "Export not found" });
     return;
   }
 
   let downloadUrl: string | null = null;
-  if (exportRecord.status === 'EXPORTED' && exportRecord.storageKey) {
+  if (exportRecord.status === "EXPORTED" && exportRecord.storageKey) {
     downloadUrl = `https://storage.example.com/presigned-download/${exportRecord.storageKey}`;
   }
 

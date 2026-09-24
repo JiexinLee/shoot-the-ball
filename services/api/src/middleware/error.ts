@@ -1,7 +1,7 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { logger } from '../config/logger';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 
 export function notFoundHandler(req: Request, res: Response): void {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
@@ -23,7 +23,7 @@ export function errorHandler(
     return;
   }
 
-  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+  if (err instanceof PrismaClientKnownRequestError) {
     if (err.code === 'P2025') {
       res.status(404).json({ error: 'Record not found' });
       return;
@@ -35,9 +35,9 @@ export function errorHandler(
   }
 
   if (err && typeof err === 'object' && 'message' in err) {
-    const msg = (err as { message: unknown }).message;
-    if (typeof msg === 'string' && msg.includes('Unauthorized')) {
-      res.status(401).json({ error: msg });
+    const obj = err as { message?: unknown };
+    if (typeof obj.message === 'string' && obj.message.includes('Unauthorized')) {
+      res.status(401).json({ error: obj.message });
       return;
     }
   }

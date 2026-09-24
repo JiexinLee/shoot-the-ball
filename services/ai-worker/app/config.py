@@ -38,7 +38,10 @@ class Settings(BaseSettings):
     ai_worker_mode: Literal["all", "processing", "export"] = "all"
     ai_model_version: str = "0.1.0"
     ai_pipeline_version: str = "0.1.0"
-    ai_worker_tmp_dir: str = "/tmp/shoot-the-ball"
+    
+    # TODO: to be changed to the local tmp dir
+    # e.g. /Users/jiexinli/MyProjects/shoot-the-ball/assets/clips-out
+    ai_worker_tmp_dir: str = "" 
 
     ai_default_highlight_pre_seconds: float = 5.0
     ai_default_highlight_post_seconds: float = 3.0
