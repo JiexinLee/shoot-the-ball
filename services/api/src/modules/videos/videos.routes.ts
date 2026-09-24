@@ -10,7 +10,7 @@ import {
   createPresignedDownload,
   createPresignedUpload,
   headObject,
-} from "../../storage/s3";
+} from "../../storage/object-storage";
 import { env } from "../../config/env";
 import { logger } from "../../config/logger";
 

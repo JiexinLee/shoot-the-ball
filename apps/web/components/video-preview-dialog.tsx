@@ -30,7 +30,10 @@ function formatBytes(n: number): string {
   return `${n} B`;
 }
 
-export function VideoPreviewDialog({ video, onClose }: VideoPreviewDialogProps) {
+export function VideoPreviewDialog({
+  video,
+  onClose,
+}: VideoPreviewDialogProps) {
   React.useEffect(() => {
     if (!video) return;
     const onKey = (e: KeyboardEvent) => {
@@ -63,28 +66,31 @@ export function VideoPreviewDialog({ video, onClose }: VideoPreviewDialogProps) 
       <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
       <div
         className={cn(
-          "relative z-10 flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl"
+          "relative z-10 flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl",
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 顶部栏 */}
+        {/* Top bar */}
         <div className="flex items-center justify-between gap-4 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0 space-y-0.5">
             <h3 className="line-clamp-1 text-lg font-semibold">{video.name}</h3>
             <p className="text-xs text-[var(--muted-foreground)]">
-              {formatBytes(video.sizeBytes)} · {formatDuration(video.durationSec)}
-              {video.width && video.height ? ` · ${video.width}×${video.height}` : ""}
+              {formatBytes(video.sizeBytes)} ·{" "}
+              {formatDuration(video.durationSec)}
+              {video.width && video.height
+                ? ` · ${video.width}×${video.height}`
+                : ""}
               {video.mimeType ? ` · ${video.mimeType}` : ""}
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={handleDownload}>
-              <Download className="h-4 w-4" /> 下载原文件
+              <Download className="h-4 w-4" /> Download Original
             </Button>
             <Button
               variant="ghost"
               size="icon"
-              aria-label="关闭"
+              aria-label="Close"
               onClick={onClose}
               className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
             >
@@ -93,7 +99,7 @@ export function VideoPreviewDialog({ video, onClose }: VideoPreviewDialogProps) 
           </div>
         </div>
 
-        {/* 视频区 */}
+        {/* Video area */}
         <div className="flex-1 overflow-auto bg-black">
           <video
             autoPlay
@@ -104,11 +110,14 @@ export function VideoPreviewDialog({ video, onClose }: VideoPreviewDialogProps) 
           />
         </div>
 
-        {/* 底部提示 */}
+        {/* Footer hint */}
         <div className="border-t border-[var(--border)] bg-[var(--muted)]/30 px-5 py-3 text-xs text-[var(--muted-foreground)]">
-          提示：当前为本地开发模式，文件仅在浏览器中预览。接入后端后，会调用
-          <span className="mx-1 font-mono text-[var(--primary)]">POST /v1/videos</span>
-          上传到对象存储并进入 AI 分析队列。
+          Note: Currently in local dev mode, files are previewed in browser
+          only. After connecting the backend, this will call
+          <span className="mx-1 font-mono text-[var(--primary)]">
+            POST /v1/videos
+          </span>
+          to upload to object storage and enter the AI processing queue.
         </div>
       </div>
     </div>

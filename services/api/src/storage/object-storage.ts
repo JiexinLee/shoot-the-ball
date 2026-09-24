@@ -9,41 +9,66 @@ import { env } from "../config/env";
 import { logger } from "../config/logger";
 
 /**
- * S3 兼容对象存储封装（Cloudflare R2 / AWS S3 / MinIO / 本地 LocalStack 都能跑）。
+ * 对象存储抽象层（Object Storage Abstraction）。
+ *
+ * ⚠️ 重要设计说明 —— 为什么用 @aws-sdk/client-s3 连 Cloudflare R2：
+ *    Cloudflare R2 官方文档明确支持「S3-compatible REST API / XML API」，
+ *    也就是说 R2 的 HTTP 接口 + 签名算法（SigV4）+ URL 结构和 AWS S3 是二进制兼容的。
+ *    所以业界（rclone / Cyberduck / Prefect / Airflow 等主流工具）统一做法就是复用
+ *    AWS S3 SDK，只需要覆盖 endpoint 和 region 两个字段。
+ *
+ *    为什么不写一个原生 R2 Client？
+ *    R2 自身并没有单独的 JS SDK，Cloudflare 官方推荐的就是用 AWS SDK v3，
+ *    单独封装 R2-specific client = 重复造轮子，没有任何收益。
  *
  * 本层只做：
- *   ① 单例 S3Client（懒初始化 + 配置兼容）
+ *   ① 单例存储客户端（懒初始化 + 配置分支）
  *   ② 预签名上传/下载 URL
  *   ③ 对某个 key 做 HeadObject（用于 /videos/:id/complete 校验文件是否真的被客户端传上去了，防止伪造）
  *
+ * 支持的后端（由 STORAGE_PROVIDER / STORAGE_ENDPOINT 两个 env 自动切换）：
+ *   ✅ Cloudflare R2（STORAGE_PROVIDER=r2，生产默认）
+ *   ✅ AWS S3（STORAGE_PROVIDER=s3，STORAGE_ENDPOINT 留空，留作未来大规模迁移备选）
+ *   ✅ MinIO / LocalStack（本地离线开发，STORAGE_ENDPOINT=http://127.0.0.1:9000）
+ *
  * TODO(Storage): 后续需要「服务端上传 / 服务端复制 / 生命周期 / 预签名 POST (multipart 大文件分片上传)」时，
- *               继续在这个文件里加方法，不要散落到各 modules 里。
+ *                继续在这个文件里加方法，不要散落到各 modules 里。
  */
-let s3Client: S3Client | null = null;
+let storageClient: S3Client | null = null;
 
-export function getS3Client(): S3Client {
-  if (!s3Client) {
+export function getStorageClient(): S3Client {
+  if (!storageClient) {
     if (!env.STORAGE_ACCESS_KEY_ID || !env.STORAGE_SECRET_ACCESS_KEY) {
       logger.warn(
         { provider: env.STORAGE_PROVIDER },
         "Storage credentials not set; presigned URLs will fail at runtime.",
       );
     }
-    s3Client = new S3Client({
-      region: env.STORAGE_REGION,
+
+    // ======================================================================
+    // R2-specific 细节（和原生 AWS S3 的 4 处差异）：
+    //   1. region: Cloudflare R2 文档明文要求必须写 "auto"（R2 是多区域副本，
+    //      不存在具体的物理 region，签名算法里的 region 字段就填这个固定字符串）。
+    //      AWS SDK v3 对非标准 region 不做硬校验，直接透传到签名里 = OK。
+    //   2. endpoint: 必须手动指定（格式 https://<account-id>.r2.cloudflarestorage.com），
+    //      否则 SDK 会拼 s3.<region>.amazonaws.com 打到真 AWS 去。
+    //   3. forcePathStyle: R2 不支持 virtual-hosted-style（bucket 放 Host 头），
+    //      只能用 path-style（/bucket-name/key 路径）。其他 S3-compatible 产品
+    //      （MinIO / LocalStack）同理。真正的 AWS S3 STORAGE_ENDPOINT 留空时 = false，
+    //      自动走 virtual-hosted-style，一行分支覆盖所有后端。
+    //   4. signatureVersion: 都是 SigV4，两家一致，不需要额外配置。
+    // ======================================================================
+    storageClient = new S3Client({
+      region: env.STORAGE_REGION || "auto",
       endpoint: env.STORAGE_ENDPOINT || undefined,
       credentials: {
         accessKeyId: env.STORAGE_ACCESS_KEY_ID,
         secretAccessKey: env.STORAGE_SECRET_ACCESS_KEY,
       },
-      /**
-       * Cloudflare R2 / MinIO / LocalStack 这类 S3 兼容产品都要 forcePathStyle=true，
-       * AWS 官方 S3 默认会走 virtual-hosted-style，两种都兼容。
-       */
       forcePathStyle: !!env.STORAGE_ENDPOINT,
     });
   }
-  return s3Client;
+  return storageClient;
 }
 
 export interface PresignedUpload {
@@ -63,12 +88,11 @@ export async function createPresignedUpload(
   contentType: string,
   opts?: { contentLength?: number },
 ): Promise<PresignedUpload> {
-  const client = getS3Client();
+  const client = getStorageClient();
   const command = new PutObjectCommand({
     Bucket: env.STORAGE_BUCKET_SOURCE,
     Key: key,
     ContentType: contentType,
-    // 强烈建议客户端带上 Content-Length，防止故意传超大文件填满 bucket。
     ContentLength: opts?.contentLength,
   });
   const url = await _getSignedUrl(client, command, {
@@ -92,7 +116,7 @@ export async function createPresignedDownload(
   bucket: "source" | "exports",
   key: string,
 ): Promise<PresignedDownload> {
-  const client = getS3Client();
+  const client = getStorageClient();
   const bucketName =
     bucket === "source"
       ? env.STORAGE_BUCKET_SOURCE
@@ -116,7 +140,7 @@ export async function headObject(
   bucket: "source" | "exports",
   key: string,
 ): Promise<{ sizeBytes: number; contentType: string; etag?: string } | null> {
-  const client = getS3Client();
+  const client = getStorageClient();
   const bucketName =
     bucket === "source"
       ? env.STORAGE_BUCKET_SOURCE

@@ -20,7 +20,7 @@ function Logo() {
           Shoot <span className="text-[var(--primary)]">The</span> Ball
         </div>
         <div className="text-xs text-[var(--muted-foreground)]">
-          篮球高光 · 智能剪辑控制台
+          Basketball Highlight · Smart Clipping Console
         </div>
       </div>
     </div>
@@ -41,7 +41,7 @@ export default function HomePage() {
               <Sparkles className="h-4 w-4 text-[var(--primary)]" /> AI Pipeline
             </Button>
             <Button variant="ghost" size="sm">
-              <Cpu className="h-4 w-4 text-[var(--primary)]" /> Worker 状态
+              <Cpu className="h-4 w-4 text-[var(--primary)]" /> Worker Status
             </Button>
             <Button
               asChild
@@ -55,7 +55,7 @@ export default function HomePage() {
                 rel="noreferrer noopener"
                 aria-label="GitHub"
               >
-                <ExternalLink className="h-4 w-4" /> 代码仓库
+                <ExternalLink className="h-4 w-4" /> Repository
               </a>
             </Button>
           </nav>
@@ -79,20 +79,22 @@ export default function HomePage() {
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--primary)] opacity-60" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--primary)]" />
               </span>
-              开发模式 · 本地预览版（模拟上传进度，文件不会离开浏览器）
+              Dev Mode · Local Preview (simulated upload progress, files stay in
+              browser)
             </span>
             <h1 className="max-w-3xl text-4xl font-extrabold tracking-tight sm:text-5xl lg:text-6xl">
-              把你的整场录像
+              Turn your full-game footage into
               <br />
               <span className="bg-gradient-to-r from-[var(--primary)] to-[var(--accent)] bg-clip-text text-transparent">
-                秒级切出精彩瞬间
+                highlight clips in seconds
               </span>
             </h1>
             <p className="max-w-2xl text-base text-[var(--muted-foreground)] sm:text-lg">
-              拖拽上传 MP4 / MOV / MKV 等任意篮球比赛视频，AI Worker
-              会自动识别「进球、三分、助攻、抢断、盖帽」等事件，
-              自动生成每个瞬间的独立短视频 +
-              整场集锦。下面就是你日常调试上传链路用的工作台。
+              Drag and drop any basketball game video (MP4 / MOV / MKV, etc.),
+              and the AI Worker will automatically detect events like &quot;Made
+              Basket, 3-pointer, Assist, Steal, Block&quot;, generating individual
+              clips for each moment plus a full-game montage. Below is your
+              daily workbench for debugging the upload pipeline.
             </p>
           </div>
         </div>
@@ -107,11 +109,11 @@ export default function HomePage() {
       <footer className="mt-auto border-t border-[var(--border)]">
         <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-4 px-4 py-6 sm:flex-row sm:items-center sm:px-6 lg:px-8">
           <p className="text-xs text-[var(--muted-foreground)]">
-            © {new Date().getFullYear()} Shoot The Ball ·
-            本控制台仅用于开发调试，暂未接入真实上传接口。
+            © {new Date().getFullYear()} Shoot The Ball · This console is for
+            development and debugging only; real upload API not yet connected.
           </p>
           <p className="text-xs text-[var(--muted-foreground)]">
-            技术栈：<span className="text-[var(--primary)]">Next.js 16</span> ·
+            Stack: <span className="text-[var(--primary)]">Next.js 16</span> ·
             Tailwind v4 · shadcn/ui · pnpm workspace
           </p>
         </div>

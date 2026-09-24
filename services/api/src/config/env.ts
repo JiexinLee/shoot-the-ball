@@ -1,7 +1,50 @@
 import dotenv from "dotenv";
-import { cleanEnv, host, port, str, num, bool } from "envalid";
+import { cleanEnv, host, port, str, num, bool, makeValidator } from "envalid";
 
 dotenv.config({ path: [".env.local", ".env", "../../.env"] });
+
+// =========================================================================
+// 自定义 Validator（关键修复点）
+// =========================================================================
+// envalid 内置的 host() / port() 强制非空校验：哪怕传空字符串也会报 "Invalid host/port"。
+// 但我们优先级是 REDIS_URL 优先：配置了 REDIS_URL（如 Upstash）时，REDIS_HOST / REDIS_PORT
+// 允许空值回退到 schema default。否则用户在根目录 .env 留了空 HOST/PORT 就会导致 API
+// 启动瞬间炸 "Invalid environment variables"。下面用 makeValidator 给空值打桩回 undefined，
+// 让 envalid 自己走 default 分支。
+const hostOrEmpty = makeValidator<string>((input: string) => {
+  const trimmed = String(input ?? "").trim();
+  if (!trimmed) return "127.0.0.1";
+  // 复用 envalid 内置 host() 对非空值做格式校验（IP / domain / localhost）
+  try {
+    return cleanEnv({ _H: trimmed }, { _H: host() } as unknown as Record<
+      string,
+      never
+    >)._H as string;
+  } catch (err) {
+    const msg =
+      err && typeof err === "object" && "message" in err
+        ? String((err as { message: unknown }).message)
+        : String(err);
+    throw new Error(`REDIS_HOST invalid: ${msg}`);
+  }
+});
+
+const portOrEmpty = makeValidator<number>((input: string) => {
+  const trimmed = String(input ?? "").trim();
+  if (!trimmed) return 6379;
+  try {
+    return cleanEnv({ _P: trimmed }, { _P: port() } as unknown as Record<
+      string,
+      never
+    >)._P as number;
+  } catch (err) {
+    const msg =
+      err && typeof err === "object" && "message" in err
+        ? String((err as { message: unknown }).message)
+        : String(err);
+    throw new Error(`REDIS_PORT invalid: ${msg}`);
+  }
+});
 
 // =========================================================================
 // 环境变量 Schema
@@ -43,8 +86,8 @@ const _schema = {
   DIRECT_DATABASE_URL: str({ default: "" }),
 
   // ---------- Queue / Redis ----------
-  REDIS_HOST: host({ default: "127.0.0.1" }),
-  REDIS_PORT: port({ default: 6379 }),
+  REDIS_HOST: hostOrEmpty(),
+  REDIS_PORT: portOrEmpty(),
   REDIS_PASSWORD: str({ default: "" }),
   REDIS_DB: num({ default: 0 }),
   REDIS_URL: str({ default: "" }),
