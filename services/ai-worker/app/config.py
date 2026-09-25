@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     ai_demo_mode: bool = False
     ai_demo_highlight_count: int = 0
     ai_demo_seed: int = 20260922
+    ai_torch_backend: Literal["auto", "mps", "cpu", "cuda"] = "auto"
 
 
 @lru_cache

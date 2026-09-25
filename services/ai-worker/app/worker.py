@@ -65,7 +65,7 @@ def _update_api_job(job_id: str, status: str, progress: float, stage: str | None
     try:
         headers = {}
         if settings.api_internal_token:
-            headers["Authorization"] = f"Bearer {settings.api_internal_token}"
+            headers["X-Internal-Token"] = settings.api_internal_token
         httpx.patch(
             f"{settings.api_base_url}/jobs/{job_id}",
             json=payload,
@@ -119,7 +119,7 @@ def process_video(video_id: str, project_id: str, user_id: str) -> dict:
         try:
             headers = {}
             if settings.api_internal_token:
-                headers["Authorization"] = f"Bearer {settings.api_internal_token}"
+                headers["X-Internal-Token"] = settings.api_internal_token
             httpx.post(
                 f"{settings.api_base_url}/videos/{video_id}/highlights/bulk",
                 json={"highlights": highlights_payload},
@@ -224,7 +224,7 @@ def main() -> None:
     parser.add_argument("--user-id", default="dev-user", help="Dev: override user id")
     args = parser.parse_args()
 
-    # ================ 模式 A：本地调试，直接跑 pipeline ================
+    # ================ Mode A: Local debug, run pipeline on a local file ================
     if args.local_video:
         logger.info(f"Running local pipeline on {args.local_video}")
         ctx = PipelineContext(
@@ -261,7 +261,7 @@ def main() -> None:
         print(json.dumps(out, indent=2))
         return
 
-    # ================ 模式 B/C：走 RQ Worker 消费队列 ================
+    # ================ Mode B / C: Run RQ worker, consume queues ================
     conn = _redis_conn()
     queues: list[Queue] = []
     if settings.ai_worker_mode in ("all", "processing"):
@@ -277,7 +277,7 @@ def main() -> None:
     worker = Worker(queues=[q.name for q in queues], connection=conn)
 
     def _shutdown(sig, frame):  # noqa: ARG001
-        """收到 Ctrl+C 或 docker stop 时，把当前任务做完再干净退出。"""
+        """Receive Ctrl+C / docker stop; finish the in-flight job, then exit cleanly."""
         logger.info(f"Signal {sig} received, shutting down worker")
         worker.stop()
         sys.exit(0)
