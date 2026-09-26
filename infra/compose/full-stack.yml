@@ -1,77 +1,128 @@
-name: shoot-the-ball-full
+# ==============================================================
+# Shoot-The-Ball · Full Stack Docker 一键起（高级入口 2）
+# --------------------------------------------------------------
+# ⚠️ 日常开发推荐用根 docker-compose.yml（只起 DB+Redis，API/Web 本机 pnpm dev，带热重载）。
+#    这个 full-stack 是高级入口：一键起「Postgres + Redis + Node API + Python AI Worker」
+#    四个容器全链路，不需要本地装 Node/Python/poetry/pnpm，新同事来了一条命令能跑整个后端。
+#    但代码修改需要重新 build 镜像（热重载慢），所以平时开发不用，做 e2e 测试/演示用。
+#
+# 对象存储：所有 4 个容器都用根目录 .env / .env.local 里的 Cloudflare R2 Dev 凭据，
+#         不跑本地 MinIO。如果走云端生产模式直接绑定生产 env 就行。
+#
+# 启动：docker compose -f infra/compose/full-stack.yml up --build -d
+#       （首次启动要 build API + AI Worker 镜像，约 3-10 分钟，耐心等）
+# ==============================================================
+name: shoot-the-ball-full-stack
+
 include:
-  - path: infra/compose/dev-infra.yml
+  # 复用 postgres + redis 两个基础服务（和 dev-infra.yml / 根 compose.yml 完全一致，账密版本号 100% 对齐）
+  - path: ./dev-infra.yml
+
 services:
+  # ------------------------------------------------------------
+  # Node.js REST API（Express + Prisma）
+  #   容器网络 host=postgres/redis，端口映射到本机 127.0.0.1:4000
+  #   MVP 阶段无 migrations 目录，DB schema 对齐用 prisma db push
+  #   （在 pnpm dev:up 初始化脚本里已执行过，容器启动直接跑服务即可）
+  # ------------------------------------------------------------
   api:
     build:
-      context: ./services/api
-      dockerfile: Dockerfile
+      context: ../../
+      dockerfile: ./services/api/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
     environment:
       NODE_ENV: development
+      APP_ENV: development
       API_HOST: 0.0.0.0
       API_PORT: 4000
       API_PREFIX: /v1
       API_CORS_ORIGIN: "*"
-      JWT_SECRET: "dev-only-secret-change-in-production"
-      DATABASE_URL: "postgresql://shoot_the_ball:shoot_the_ball_dev_password@postgres:5432/shoot_the_ball?sslmode=disable"
-      DIRECT_DATABASE_URL: "postgresql://shoot_the_ball:shoot_the_ball_dev_password@postgres:5432/shoot_the_ball?sslmode=disable"
+      # ---------- DB（容器网络内用 postgres:5432，不是 127.0.0.1）----------
+      DATABASE_URL: "postgresql://shoot:shootdevpass123@postgres:5432/shoot_the_ball_dev?schema=public&sslmode=disable&connect_timeout=10"
+      DIRECT_DATABASE_URL: "postgresql://shoot:shootdevpass123@postgres:5432/shoot_the_ball_dev?schema=public&sslmode=disable&connect_timeout=10"
+      # ---------- Redis（容器内 redis:6379，密码 shootredisdevpass123）----------
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_DB: 0
-      REDIS_URL: "redis://redis:6379/0"
-      STORAGE_PROVIDER: s3
-      STORAGE_ENDPOINT: "http://minio:9000"
-      STORAGE_REGION: us-east-1
-      STORAGE_ACCESS_KEY_ID: minio_admin
-      STORAGE_SECRET_ACCESS_KEY: minio_dev_password
-      STORAGE_BUCKET_SOURCE: shoot-the-ball-source
-      STORAGE_BUCKET_EXPORTS: shoot-the-ball-exports
+      REDIS_PASSWORD: "shootredisdevpass123"
+      REDIS_URL: "redis://:shootredisdevpass123@redis:6379/0"
+      # ---------- 开发模式跳过 JWT ----------
+      DEV_BYPASS_AUTH: "true"
+      DEV_FIXED_USER_ID: "user_dev_000000000000001"
+      DEV_FIXED_USER_EMAIL: "dev@shoot-the-ball.local"
+      DEV_FIXED_USER_NAME: "Developer"
+      # ---------- BullMQ ----------
+      BULLMQ_CONCURRENCY: "2"
+      BULLMQ_PROCESSING_QUEUE: "video-processing"
+      BULLMQ_EXPORT_QUEUE: "video-export"
+      JOBS_SSE_POLL_INTERVAL_MS: "1500"
+      JOBS_SSE_MAX_CONNECTION_MS: "600000"
+      # ---------- 共享密钥 / 对象存储（STORAGE_* & JWT / API_INTERNAL_TOKEN）----------
+      # ⚠️ 不要在这里写死 STORAGE_* / API_INTERNAL_TOKEN / JWT_SECRET 这些私密值！
+      #    启动 full-stack 时，会自动从项目根目录的 .env / .env.local 继承这些变量，
+      #    只有 DB/Redis 这种和容器网络绑定的变量才在这里覆盖。
+      JWT_SECRET: "please_change_me_to_a_random_32_bytes_string_at_least_for_dev_only"
+      JWT_EXPIRES_IN: "7d"
     ports:
       - "4000:4000"
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        cd /app
-        node_modules/.bin/prisma migrate deploy || true
-        node dist/main.js
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
+  # ------------------------------------------------------------
+  # Python AI Worker（FastAPI + ultralytics YOLOv8）
+  #   监听 BullMQ 的 video-processing / video-export 两个队列，
+  #   消费后 PATCH /v1/jobs/:id 回写进度，最后 POST /highlights/bulk。
+  #   默认 AI_DEMO_MODE=true（跳过真模型，先跑通调度链路），接真模型改 false。
+  # ------------------------------------------------------------
   ai-worker:
     build:
-      context: ./services/ai-worker
-      dockerfile: Dockerfile
+      context: ../../
+      dockerfile: ./services/ai-worker/Dockerfile
     restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      api:
+        condition: service_started
     environment:
       APP_ENV: development
+      # ---------- PATCH jobs / POST highlights 时调用的 API server（容器内 api:4000）----------
+      API_BASE_URL: "http://api:4000/v1"
+      # ---------- Redis（容器内 redis:6379，同 API 一致）----------
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_URL: "redis://redis:6379/0"
-      API_BASE_URL: "http://api:4000/v1"
-      STORAGE_PROVIDER: s3
-      STORAGE_ENDPOINT: "http://minio:9000"
-      STORAGE_REGION: us-east-1
-      STORAGE_ACCESS_KEY_ID: minio_admin
-      STORAGE_SECRET_ACCESS_KEY: minio_dev_password
-      STORAGE_BUCKET_SOURCE: shoot-the-ball-source
-      STORAGE_BUCKET_EXPORTS: shoot-the-ball-exports
-      AI_WORKER_MODE: all
+      REDIS_PASSWORD: "shootredisdevpass123"
+      REDIS_URL: "redis://:shootredisdevpass123@redis:6379/0"
+      # ---------- Queue 配置（必须和 API 完全一致）----------
+      BULLMQ_PROCESSING_QUEUE: "video-processing"
+      BULLMQ_EXPORT_QUEUE: "video-export"
+      BULLMQ_CONCURRENCY: "2"
+      # ---------- Worker 行为 ----------
+      AI_WORKER_MODE: "all"
+      AI_MODEL_VERSION: "0.1.0"
+      AI_PIPELINE_VERSION: "0.1.0"
+      AI_WORKER_TMP_DIR: "/tmp/shoot-the-ball-worker"
+      AI_DEFAULT_HIGHLIGHT_PRE_SECONDS: "5.0"
+      AI_DEFAULT_HIGHLIGHT_POST_SECONDS: "3.0"
+      AI_COARSE_FPS: "2.0"
+      AI_FINE_FPS: "8.0"
+      AI_CONFIDENCE_THRESHOLD: "0.55"
+      # ---------- ⚡ Stage 1：跳过真 YOLO，sleep 模拟进度 ----------
+      AI_DEMO_MODE: "true"
+      AI_TORCH_BACKEND: "cpu"
+      # ---------- STORAGE_* & API_INTERNAL_TOKEN ----------
+      # ⚠️ 和 API 一样，从根目录 .env / .env.local 自动继承，不要写死在这里
     volumes:
-      - ai_worker_tmp:/tmp/shoot-the-ball
+      - ai_worker_tmp:/tmp/shoot-the-ball-worker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
+  # 复用 dev-infra.yml 里的 postgres_data / redis_data，另外加 AI Worker 临时文件 volume
   ai_worker_tmp:
-    driver: local

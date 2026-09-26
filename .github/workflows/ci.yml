@@ -10,74 +10,167 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# ====================================================================
+# CI 环境变量统一放在顶层（DRY，不要在每个 step env 重复写 3 遍 CI password）
+# DB / Redis 用 CI 独立账号密码，不和开发/生产混淆。
+# 对象 Storage 单测不打真 Cloudflare R2（节省 egress + 不会污染 Dev 桶）
+#   单测里如果真的要测 Storage 层，用 Mock S3Provider + Local FS。
+# ====================================================================
+env:
+  CI_POSTGRES_USER: ci_shoot
+  CI_POSTGRES_PASSWORD: ci_shoot_devpass123
+  CI_POSTGRES_DB: shoot_the_ball_ci
+  CI_REDIS_PASSWORD: ci_shoot_redis_pass123
+  CI_JWT_SECRET: ci_jwt_secret_please_ignore_not_real_do_not_use_in_production
+
 jobs:
-  api-lint-and-test:
-    name: API · Lint + Test
+  # ------------------------------------------------------------------
+  # Job 1 / 4 : Shared Contracts 类型契约包
+  #   （API 和 Web 都依赖 contracts，必须第一个 build 通过）
+  # ------------------------------------------------------------------
+  contracts-build:
+    name: Contracts · Build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: shoot_the_ball_ci
-          POSTGRES_USER: ci
-          POSTGRES_PASSWORD: ci_password
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U ci -d shoot_the_ball_ci"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 12
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-      - name: Install root
+      - name: Install root + contracts deps
         run: pnpm install --frozen-lockfile
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-      - name: Install API deps
-        working-directory: services/api
-        run: pnpm install --frozen-lockfile
       - name: Build contracts
         run: pnpm --filter @shoot-the-ball/contracts build
-      - name: Prisma generate + migrate
+
+  # ------------------------------------------------------------------
+  # Job 2 / 4 : Node API · Lint + Build + Test
+  #   需要 Postgres + Redis 两个 service（都是 CI 独立账号密码）
+  # ------------------------------------------------------------------
+  api-lint-and-test:
+    name: API · Lint + Test
+    needs: contracts-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.4-alpine3.20
+        env:
+          POSTGRES_DB: ${{ env.CI_POSTGRES_DB }}
+          POSTGRES_USER: ${{ env.CI_POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.CI_POSTGRES_PASSWORD }}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ${{ env.CI_POSTGRES_USER }} -d ${{ env.CI_POSTGRES_DB }}"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 3s
+      redis:
+        image: redis:7.4-alpine
+        # ⚠️ CI Redis 也带密码启动（与开发/生产环境行为一致，BullMQ 认证逻辑正确），
+        #   不要无密码起 service，否则本地带密码单测能过但 CI 能过但生产密码单测
+        #   会在本机上跑挂（反过来也一样）。
+        command: >
+          redis-server
+          --requirepass ${{ env.CI_REDIS_PASSWORD }}
+          --appendonly yes
+          --maxmemory 256mb
+          --maxmemory-policy noeviction
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli -a ${{ env.CI_REDIS_PASSWORD }} ping | grep -q PONG"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 3s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install root + all workspace deps (pnpm workspace)
+        run: pnpm install --frozen-lockfile
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      - name: Prisma generate + DB 对齐 schema
         working-directory: services/api
         env:
-          DATABASE_URL: postgresql://ci:ci_password@localhost:5432/shoot_the_ball_ci?sslmode=disable
-          DIRECT_DATABASE_URL: postgresql://ci:ci_password@localhost:5432/shoot_the_ball_ci?sslmode=disable
-          JWT_SECRET: ci_test_secret
+          DATABASE_URL: postgresql://${{ env.CI_POSTGRES_USER }}:${{ env.CI_POSTGRES_PASSWORD }}@localhost:5432/${{ env.CI_POSTGRES_DB }}?sslmode=disable&schema=public
+          DIRECT_DATABASE_URL: postgresql://${{ env.CI_POSTGRES_USER }}:${{ env.CI_POSTGRES_PASSWORD }}@localhost:5432/${{ env.CI_POSTGRES_DB }}?sslmode=disable&schema=public
+          JWT_SECRET: ${{ env.CI_JWT_SECRET }}
         run: |
+          # MVP 阶段我们用 db:push 对齐 schema（没有手写 migrations/ 目录）
+          # migrate deploy 需要 migrations/ 目录存在，否则 Prisma 报 P3009。
           pnpm db:generate
-          pnpm db:migrate:prod
+          pnpm db:push --skip-generate
       - name: Lint API
         working-directory: services/api
         run: pnpm lint
+      - name: Type Check API
+        working-directory: services/api
+        run: pnpm exec tsc --noEmit
       - name: Build API
         working-directory: services/api
         run: pnpm build
       - name: Test API
         working-directory: services/api
         env:
-          DATABASE_URL: postgresql://ci:ci_password@localhost:5432/shoot_the_ball_ci?sslmode=disable
-          DIRECT_DATABASE_URL: postgresql://ci:ci_password@localhost:5432/shoot_the_ball_ci?sslmode=disable
-          JWT_SECRET: ci_test_secret
-          REDIS_URL: redis://localhost:6379/0
+          DATABASE_URL: postgresql://${{ env.CI_POSTGRES_USER }}:${{ env.CI_POSTGRES_PASSWORD }}@localhost:5432/${{ env.CI_POSTGRES_DB }}?sslmode=disable&schema=public
+          DIRECT_DATABASE_URL: postgresql://${{ env.CI_POSTGRES_USER }}:${{ env.CI_POSTGRES_PASSWORD }}@localhost:5432/${{ env.CI_POSTGRES_DB }}?sslmode=disable&schema=public
+          JWT_SECRET: ${{ env.CI_JWT_SECRET }}
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          REDIS_PASSWORD: ${{ env.CI_REDIS_PASSWORD }}
+          REDIS_URL: redis://:${{ env.CI_REDIS_PASSWORD }}@localhost:6379/0
+          STORAGE_PROVIDER: s3
         run: pnpm test -- --coverage
 
+  # ------------------------------------------------------------------
+  # Job 3 / 4 : Next.js Web · Type Check + Build
+  #   （不跑 Playwright e2e，MVP 阶段太重；至少 ts 编译 + Next build 不报错）
+  # ------------------------------------------------------------------
+  web-typecheck-and-build:
+    name: Web · TypeCheck + Build
+    needs: contracts-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NEXT_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      - name: Type check Web
+        working-directory: apps/web
+        run: pnpm exec tsc --noEmit
+      - name: Build Web (Next.js production build)
+        working-directory: apps/web
+        env:
+          NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:4000/v1
+        run: pnpm build
+
+  # ------------------------------------------------------------------
+  # Job 4 / 4 : Python AI Worker · Ruff + Pytest
+  # ------------------------------------------------------------------
   ai-worker-lint-and-test:
     name: AI Worker · Lint + Test
     runs-on: ubuntu-latest
@@ -87,14 +180,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install poetry
+      - name: Install Poetry
         run: curl -sSL https://install.python-poetry.org | python3 -
-      - name: Install deps
+      - name: Install system deps (ffmpeg + libsm6 for ultralytics/YOLO)
+        run: >
+          sudo apt-get update && sudo apt-get install --no-install-recommends -y
+          ffmpeg libglib2.0-0 libsm6 libxext6 libxrender1
+          && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+      - name: Install Python deps
         working-directory: services/ai-worker
-        run: poetry install --no-interaction --no-root
+        run: poetry install --no-interaction --no-root --with dev
       - name: Ruff check
         working-directory: services/ai-worker
         run: poetry run ruff check app tests
-      - name: Test AI worker
+      - name: Test AI worker (skip real YOLO via env)
         working-directory: services/ai-worker
+        env:
+          AI_DEMO_MODE: "true"
+          AI_TORCH_BACKEND: cpu
         run: poetry run pytest -q --cov=app

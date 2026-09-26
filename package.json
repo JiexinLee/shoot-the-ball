@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "AI Basketball Highlight Generator - Monorepo",
-  "packageManager": "pnpm@9.0.0",
+  "packageManager": "pnpm@12.6.0",
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
@@ -25,7 +25,11 @@
     "db:migrate": "pnpm --filter @shoot-the-ball/api db:migrate",
     "db:studio": "pnpm --filter @shoot-the-ball/api db:studio",
     "docker:up": "docker compose up -d",
-    "docker:down": "docker compose down"
+    "docker:down": "docker compose down",
+    "docker:reset": "docker compose down -v && docker compose pull && docker compose up -d",
+    "dev:env": "cp -f .env.development.local .env.local",
+    "dev:up": "pnpm run dev:env && pnpm run docker:reset && sleep 8 && pnpm --filter @shoot-the-ball/api run db:push && pnpm --filter @shoot-the-ball/api run db:seed",
+    "dev:start": "turbo run dev --filter=@shoot-the-ball/api --filter=@shoot-the-ball/web --parallel"
   },
   "devDependencies": {
     "turbo": "^2.0.0",

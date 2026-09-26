@@ -36,7 +36,8 @@ jobs:
             type=sha,format=long
       - uses: docker/build-push-action@v5
         with:
-          context: services/api
+          context: .
+          file: ./services/api/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -67,7 +68,8 @@ jobs:
             type=sha,format=long
       - uses: docker/build-push-action@v5
         with:
-          context: services/ai-worker
+          context: .
+          file: ./services/ai-worker/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

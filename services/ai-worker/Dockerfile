@@ -1,5 +1,6 @@
 # =====================================================
 # Python AI Worker
+# Build context: monorepo root (./)
 # =====================================================
 FROM python:3.11-slim AS builder
 
@@ -25,11 +26,12 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
+COPY services/ai-worker/pyproject.toml ./services/ai-worker/
 
+WORKDIR /app/services/ai-worker
 RUN poetry install --no-root --only main
 
-COPY app ./app
+COPY services/ai-worker/app ./app
 RUN poetry install --only main
 
 FROM python:3.11-slim AS runner
@@ -55,5 +57,6 @@ RUN addgroup --system app \
 
 USER app
 
+WORKDIR /app/services/ai-worker
 EXPOSE 9000
 CMD ["python", "-m", "app.worker"]

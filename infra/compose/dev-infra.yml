@@ -1,84 +1,73 @@
-name: shoot-the-ball
+# ==============================================================
+# Shoot-The-Ball · 开发模式 · 最简基础设施（备用入口 1）
+# --------------------------------------------------------------
+# ⚠️ 日常开发推荐用根目录 docker-compose.yml：`cd 到项目根目录 && docker compose up -d`
+#    这个文件等价于根 docker-compose.yml，只是放在 infra/compose/ 目录下，
+#    给习惯跳目录执行 compose 的同事用，两个文件内容 100% 一致，不会有配置差异。
+#
+# 启动：docker compose -f infra/compose/dev-infra.yml up -d
+# 对象存储：复用根目录 .env 已填好的 Cloudflare R2 Dev 凭据，不跑本地 MinIO。
+# ==============================================================
+name: shoot-the-ball-dev
+
 services:
+  # ------------------------------------------------------------
+  # PostgreSQL 16 · 开发 DB
+  #   默认端口：本机 127.0.0.1:5432
+  #   账密：shoot / shootdevpass123
+  #   数据库：shoot_the_ball_dev
+  # ------------------------------------------------------------
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine3.20
     restart: unless-stopped
     environment:
-      POSTGRES_DB: shoot_the_ball
-      POSTGRES_USER: shoot_the_ball
-      POSTGRES_PASSWORD: shoot_the_ball_dev_password
+      POSTGRES_DB: shoot_the_ball_dev
+      POSTGRES_USER: shoot
+      POSTGRES_PASSWORD: shootdevpass123
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U shoot_the_ball -d shoot_the_ball"]
+      test: ["CMD-SHELL", "pg_isready -U shoot -d shoot_the_ball_dev"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 3s
 
+  # ------------------------------------------------------------
+  # Redis 7 · BullMQ 队列 + 缓存
+  #   默认端口：本机 127.0.0.1:6379
+  #   密码：shootredisdevpass123（和 .env.development.local 字节级一致）
+  #   ⚠️ maxmemory-policy = noeviction：队列不能被 Redis LRU 弹掉！
+  # ------------------------------------------------------------
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "shootredisdevpass123",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        ["CMD-SHELL", "redis-cli -a shootredisdevpass123 ping | grep -q PONG"]
       interval: 5s
       timeout: 5s
       retries: 10
-
-  minio:
-    image: minio/minio:latest
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minio_admin
-      MINIO_ROOT_PASSWORD: minio_dev_password
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  create-buckets:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      /usr/bin/mc alias set local http://minio:9000 minio_admin minio_dev_password;
-      /usr/bin/mc mb --ignore-existing local/shoot-the-ball-source;
-      /usr/bin/mc mb --ignore-existing local/shoot-the-ball-exports;
-      /usr/bin/mc anonymous set public local/shoot-the-ball-source || true;
-      /usr/bin/mc anonymous set public local/shoot-the-ball-exports || true;
-      exit 0;
-      "
-
-  redis-commander:
-    image: rediscommander/redis-commander:latest
-    restart: "no"
-    profiles: ["tools"]
-    environment:
-      REDIS_HOSTS: "local:redis:6379"
-    ports:
-      - "8081:8081"
-    depends_on:
-      - redis
+      start_period: 3s
 
 volumes:
   postgres_data:
-    driver: local
   redis_data:
-    driver: local
-  minio_data:
-    driver: local
