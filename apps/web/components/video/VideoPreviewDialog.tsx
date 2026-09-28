@@ -4,30 +4,12 @@ import * as React from "react";
 import { X, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import type { UploadedVideo } from "@/components/video-uploader";
+import { formatBytes, formatDuration } from "@/lib/format";
+import type { UploadedVideo } from "@/lib/types";
 
 export interface VideoPreviewDialogProps {
   video: UploadedVideo | null;
   onClose: () => void;
-}
-
-function formatDuration(sec?: number): string {
-  if (!sec || !isFinite(sec)) return "--:--";
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = Math.floor(sec % 60);
-  const mm = m.toString().padStart(2, "0");
-  const ss = s.toString().padStart(2, "0");
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
-}
-
-function formatBytes(n: number): string {
-  const mb = 1024 * 1024;
-  const gb = mb * 1024;
-  if (n >= gb) return `${(n / gb).toFixed(2)} GB`;
-  if (n >= mb) return `${(n / mb).toFixed(2)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${n} B`;
 }
 
 export function VideoPreviewDialog({
@@ -70,7 +52,6 @@ export function VideoPreviewDialog({
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Top bar */}
         <div className="flex items-center justify-between gap-4 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0 space-y-0.5">
             <h3 className="line-clamp-1 text-lg font-semibold">{video.name}</h3>
@@ -99,7 +80,6 @@ export function VideoPreviewDialog({
           </div>
         </div>
 
-        {/* Video area */}
         <div className="flex-1 overflow-auto bg-black">
           <video
             autoPlay
@@ -110,7 +90,6 @@ export function VideoPreviewDialog({
           />
         </div>
 
-        {/* Footer hint */}
         <div className="border-t border-[var(--border)] bg-[var(--muted)]/30 px-5 py-3 text-xs text-[var(--muted-foreground)]">
           Note: Currently in local dev mode, files are previewed in browser
           only. After connecting the backend, this will call
