@@ -21,7 +21,7 @@ opencv-python-headless = "^4.9.0.80"
 scipy = "^1.11.4"
 ultralytics = "^8.1.0"
 tqdm = "^4.66.1"
-python-slugify = "^8.0.3"
+python-slugify = ">=8.0.3,<10.0.0"
 torch = { version = "^2.1.0", markers = "sys_platform != 'linux'" }
 torchvision = { version = "^0.16.0", markers = "sys_platform != 'linux'" }
 
