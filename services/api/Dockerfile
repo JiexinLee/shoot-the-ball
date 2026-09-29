@@ -2,7 +2,7 @@
 # Node.js + TypeScript API Service
 # Build context: monorepo root (./)
 # =====================================================
-FROM node:20-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 RUN corepack enable
 
@@ -13,7 +13,7 @@ COPY services/api/package.json ./services/api/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
   pnpm install --prod --frozen-lockfile --filter @shoot-the-ball/api...
 
-FROM node:20-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 RUN corepack enable
 
@@ -35,7 +35,7 @@ RUN pnpm --filter @shoot-the-ball/contracts run build \
   && pnpm db:generate \
   && pnpm build
 
-FROM node:20-alpine AS runner
+FROM node:26-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 nodejs \
