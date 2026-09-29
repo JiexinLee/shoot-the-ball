@@ -65,7 +65,7 @@ const _schema = {
 
   // ---------- HTTP Server ----------
   API_HOST: host({ default: "0.0.0.0" }),
-  API_PORT: port({ default: 4000 }),
+  API_PORT: port({ default: 4321 }),
   API_PREFIX: str({ default: "/v1" }),
   /** 多个域名逗号分隔；* 代表允许任意 origin，仅开发环境 */
   API_CORS_ORIGIN: str({ default: "*" }),

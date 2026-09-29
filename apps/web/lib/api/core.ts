@@ -7,7 +7,7 @@
 export const DEFAULT_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   (typeof window === "undefined"
-    ? process.env.API_PROXY_TARGET ?? "http://localhost:4000/v1"
+    ? process.env.API_PROXY_TARGET ?? "http://localhost:4321/v1"
     : "/api/v1");
 
 const TOKEN_STORAGE_KEY = "stb_auth_token";

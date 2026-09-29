@@ -38,32 +38,24 @@ let storageClient: S3Client | null = null;
 
 export function getStorageClient(): S3Client {
   if (!storageClient) {
-    if (!env.STORAGE_ACCESS_KEY_ID || !env.STORAGE_SECRET_ACCESS_KEY) {
+    const missing: string[] = [];
+    if (!env.STORAGE_ACCESS_KEY_ID) missing.push("STORAGE_ACCESS_KEY_ID");
+    if (!env.STORAGE_SECRET_ACCESS_KEY)
+      missing.push("STORAGE_SECRET_ACCESS_KEY");
+    if (!env.STORAGE_BUCKET_SOURCE) missing.push("STORAGE_BUCKET_SOURCE");
+    if (missing.length > 0) {
       logger.warn(
-        { provider: env.STORAGE_PROVIDER },
+        { provider: env.STORAGE_PROVIDER, missingEnv: missing },
         "Storage credentials not set; presigned URLs will fail at runtime.",
       );
     }
 
-    // ======================================================================
-    // R2-specific 细节（和原生 AWS S3 的 4 处差异）：
-    //   1. region: Cloudflare R2 文档明文要求必须写 "auto"（R2 是多区域副本，
-    //      不存在具体的物理 region，签名算法里的 region 字段就填这个固定字符串）。
-    //      AWS SDK v3 对非标准 region 不做硬校验，直接透传到签名里 = OK。
-    //   2. endpoint: 必须手动指定（格式 https://<account-id>.r2.cloudflarestorage.com），
-    //      否则 SDK 会拼 s3.<region>.amazonaws.com 打到真 AWS 去。
-    //   3. forcePathStyle: R2 不支持 virtual-hosted-style（bucket 放 Host 头），
-    //      只能用 path-style（/bucket-name/key 路径）。其他 S3-compatible 产品
-    //      （MinIO / LocalStack）同理。真正的 AWS S3 STORAGE_ENDPOINT 留空时 = false，
-    //      自动走 virtual-hosted-style，一行分支覆盖所有后端。
-    //   4. signatureVersion: 都是 SigV4，两家一致，不需要额外配置。
-    // ======================================================================
     storageClient = new S3Client({
       region: env.STORAGE_REGION || "auto",
       endpoint: env.STORAGE_ENDPOINT || undefined,
       credentials: {
-        accessKeyId: env.STORAGE_ACCESS_KEY_ID,
-        secretAccessKey: env.STORAGE_SECRET_ACCESS_KEY,
+        accessKeyId: env.STORAGE_ACCESS_KEY_ID || "",
+        secretAccessKey: env.STORAGE_SECRET_ACCESS_KEY || "",
       },
       forcePathStyle: !!env.STORAGE_ENDPOINT,
     });
@@ -88,6 +80,19 @@ export async function createPresignedUpload(
   contentType: string,
   opts?: { contentLength?: number },
 ): Promise<PresignedUpload> {
+  const missing: string[] = [];
+  if (!env.STORAGE_ACCESS_KEY_ID) missing.push("STORAGE_ACCESS_KEY_ID");
+  if (!env.STORAGE_SECRET_ACCESS_KEY) missing.push("STORAGE_SECRET_ACCESS_KEY");
+  if (!env.STORAGE_BUCKET_SOURCE) missing.push("STORAGE_BUCKET_SOURCE");
+  if (missing.length > 0) {
+    const err = new Error(
+      `Storage misconfigured: missing required env ${missing.join(", ")}`,
+    ) as Error & { status?: number; expose?: boolean };
+    err.status = 500;
+    err.expose = true;
+    throw err;
+  }
+
   const client = getStorageClient();
   const command = new PutObjectCommand({
     Bucket: env.STORAGE_BUCKET_SOURCE,

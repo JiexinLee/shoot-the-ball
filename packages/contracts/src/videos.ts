@@ -57,6 +57,10 @@ export const UploadSessionResponseSchema = z.object({
   videoId: z.string(),
   storageKey: z.string(),
   uploadUrl: z.string(),
+  /** 预签名 URL 的 HTTP 方法（绝大多数 S3/R2 都是 PUT） */
+  uploadMethod: z.enum(["PUT", "POST"]).default("PUT"),
+  /** 预签名 URL 失效秒数，前端可以在卡上传超时时提示重新生成 session */
+  uploadExpiresInSec: z.number().int().positive(),
 });
 export type UploadSessionResponse = z.infer<typeof UploadSessionResponseSchema>;
 

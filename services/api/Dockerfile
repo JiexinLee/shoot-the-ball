@@ -51,5 +51,5 @@ COPY --from=builder /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
 
 WORKDIR /app/services/api
 USER nestjs
-EXPOSE 4000
+EXPOSE 4321
 CMD ["node", "dist/main.js"]

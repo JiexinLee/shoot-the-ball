@@ -21,7 +21,7 @@ include:
 services:
   # ------------------------------------------------------------
   # Node.js REST API（Express + Prisma）
-  #   容器网络 host=postgres/redis，端口映射到本机 127.0.0.1:4000
+  #   容器网络 host=postgres/redis，端口映射到本机 127.0.0.1:4321
   #   MVP 阶段无 migrations 目录，DB schema 对齐用 prisma db push
   #   （在 pnpm dev:up 初始化脚本里已执行过，容器启动直接跑服务即可）
   # ------------------------------------------------------------
@@ -39,7 +39,7 @@ services:
       NODE_ENV: development
       APP_ENV: development
       API_HOST: 0.0.0.0
-      API_PORT: 4000
+      API_PORT: 4321
       API_PREFIX: /v1
       API_CORS_ORIGIN: "*"
       # ---------- DB（容器网络内用 postgres:5432，不是 127.0.0.1）----------
@@ -68,7 +68,7 @@ services:
       JWT_SECRET: "please_change_me_to_a_random_32_bytes_string_at_least_for_dev_only"
       JWT_EXPIRES_IN: "7d"
     ports:
-      - "4000:4000"
+      - "4321:4321"
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -92,8 +92,8 @@ services:
         condition: service_started
     environment:
       APP_ENV: development
-      # ---------- PATCH jobs / POST highlights 时调用的 API server（容器内 api:4000）----------
-      API_BASE_URL: "http://api:4000/v1"
+      # ---------- PATCH jobs / POST highlights 时调用的 API server（容器内 api:4321）----------
+      API_BASE_URL: "http://api:4321/v1"
       # ---------- Redis（容器内 redis:6379，同 API 一致）----------
       REDIS_HOST: redis
       REDIS_PORT: 6379

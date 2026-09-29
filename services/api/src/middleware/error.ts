@@ -35,9 +35,19 @@ export function errorHandler(
   }
 
   if (err && typeof err === 'object' && 'message' in err) {
-    const obj = err as { message?: unknown };
+    const obj = err as { message?: unknown; expose?: unknown; status?: unknown };
     if (typeof obj.message === 'string' && obj.message.includes('Unauthorized')) {
       res.status(401).json({ error: obj.message });
+      return;
+    }
+    if (
+      obj.expose === true &&
+      typeof obj.message === 'string' &&
+      typeof obj.status === 'number' &&
+      obj.status >= 400 &&
+      obj.status < 600
+    ) {
+      res.status(obj.status).json({ error: obj.message });
       return;
     }
   }

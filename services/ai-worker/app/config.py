@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_url: str = ""
 
-    api_base_url: str = "http://127.0.0.1:4000/v1"
+    api_base_url: str = "http://127.0.0.1:4321/v1"
     api_internal_token: str = ""
 
     storage_provider: str = "s3"

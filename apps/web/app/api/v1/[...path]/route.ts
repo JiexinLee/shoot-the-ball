@@ -1,11 +1,11 @@
 // ==========================================================================
 // app/api/v1/[...path]/route.ts — Next.js Route Handler BFF
 //   前端统一调同域 /api/v1/*（完全不用管 CORS），然后这个 handler 再转发给
-//   Express API（services/api，默认 http://localhost:4000/v1）。
+//   Express API（services/api，默认 http://localhost:4321/v1）。
 //
 //   配置:
-//     - API_PROXY_TARGET (server-side only env): 转发目标 baseUrl，默认 http://localhost:4000/v1
-//       生产部署时改成内网地址（例如 http://api:4000/v1），避免外网暴露。
+//     - API_PROXY_TARGET (server-side only env): 转发目标 baseUrl，默认 http://localhost:4321/v1
+//       生产部署时改成内网地址（例如 http://api:4321/v1），避免外网暴露。
 //     - 如果前端走直连（不经过 BFF），在前端 NEXT_PUBLIC_API_BASE_URL 里填完整 URL。
 //
 //   关键实现点:
@@ -18,7 +18,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 const PROXY_TARGET =
   process.env.API_PROXY_TARGET?.replace(/\/$/, "") ??
-  "http://localhost:4000/v1";
+  "http://localhost:4321/v1";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -29,11 +29,12 @@ async function proxy(
   ctx: { params: Promise<{ path: string[] }> },
 ) {
   const { path } = await ctx.params;
-  const pathname = "/" + path.join("/");
+  const joined = path.join("/");
 
+  const base = PROXY_TARGET.endsWith("/") ? PROXY_TARGET : `${PROXY_TARGET}/`;
   const upstreamUrl = new URL(
-    pathname + (req.nextUrl.search ? req.nextUrl.search : ""),
-    PROXY_TARGET,
+    joined + (req.nextUrl.search ? req.nextUrl.search : ""),
+    base,
   );
 
   const upstreamHeaders = new Headers(req.headers);
@@ -48,7 +49,7 @@ async function proxy(
     upstreamUrl.searchParams.delete("token");
   }
 
-  const isSSE = /\/jobs\/[^/]+\/events$/.test(pathname);
+  const isSSE = /\/jobs\/[^/]+\/events$/.test(`/${joined}`);
 
   let resBody: BodyInit | null = null;
   if (req.method !== "GET" && req.method !== "HEAD") {

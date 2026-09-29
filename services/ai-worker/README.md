@@ -9,7 +9,7 @@
 
 ```
 ┌─────────────────┐        ┌─────────────────────┐        ┌────────────────────────┐
-│  Next.js Web    │  HTTPS │  Node.js API (4000)  │  Redis │  Python AI Worker (本项目) │
+│  Next.js Web    │  HTTPS │  Node.js API (4321)  │  Redis │  Python AI Worker (本项目) │
 │  (用户上传视频)   │───────►│  (业务控制 / 状态机)  │──────►│                        │
 │                 │        │  · 鉴权              │        │  · 下载视频到 /tmp      │
 │  SSE 进度 ←──────│◄──────│  · SSE 长连接推进度   │◄──────│  · YOLOv8 检测球员/球   │
@@ -21,6 +21,7 @@
 ```
 
 **关键设计原则（必须理解）：**
+
 1. **AI Worker 和 Node API 是两个完全独立的进程 / 容器**，绝不混布。API 是业务控制层，Worker 是纯计算层。
 2. **Worker 不对外监听任何端口**，它只做两件事：(a) 从 Redis BLPOP 拉任务；(b) 主动发 HTTP 请求回 Node API（PATCH 进度、POST highlights）。这样被攻击面 = 0。
 3. **跨服务写操作必须带 `X-Internal-Token` 自定义头**（不是 JWT），值在两端 `.env.local` 里必须字节级完全一致。这是 Hard Constraint。
@@ -70,6 +71,7 @@ poetry run python -m app
 ```
 
 手动塞 1 个任务进队列（不用等 Web / curl 跑全链路）：
+
 ```bash
 cd services/ai-worker
 poetry run python tests/scripts/enqueue_demo_job.py
@@ -174,18 +176,19 @@ services/ai-worker/
 
 > 这是整个 AI Worker 的灵魂。**每一个阶段的输出都会写进 PipelineContext，下一阶段只读 PipelineContext，不跨阶段直接传参。** 这样做的好处是 Worker 崩溃后可以从最近完成的阶段 resume，不用重跑全流程。
 
-| Stage # | 名称（对应 ProcessingJob.stage 值） | 做什么 | 输入（读 PipelineContext 的字段） | 输出（写 PipelineContext 的字段） | 大约占总进度 |
-|---------|------------------------------------|--------|-----------------------------------|-----------------------------------|-------------|
-| **0** | **Preparing** | 1. 从 R2 下载源视频到 `/tmp`（或者 `--local-video` 直接用本地路径）<br/>2. `ffprobe` 拿 fps / width / height / duration / codec<br/>3. 校验视频可读（corrupt 的直接抛错 FAILED） | `storageKey` / `local_video_path` | `video_path` / `fps` / `width` / `height` / `total_frames` / `duration_sec` | 0 ~ 5% |
-| **1** | **Coarse Sampling**<br/>(→ stage 文案变 "Detecting") | 1. **低 FPS 均匀抽帧**（比如原视频 30fps → 抽 2fps，处理量直接砍到 1/15，省钱关键）<br/>2. 如果用户给了 `hoop_roi`（校准页面画的篮筐框），只用 ROI 区域做检测，再砍 ~80% 计算量 | `video_path` / `fps` / `hoop_roi`（可选） | `coarse_frames` (list[numpy]) / `coarse_frame_indices` / `coarse_timestamps` | 5 ~ 15% |
-| **2** | **Candidate Detection**<br/>(Detecting 继续) | 1. PlayerDetector / BallDetector 跑一遍 coarse 帧<br/>2. BallTracker.update(detections) → 得到球的轨迹（track_id 连续）<br/>3. 基于：**球突然向上 → 抛物线顶点 → 靠近 hoop bbox** → 提取出若干个 **时间候选窗口**（比如 "第 42s~48s 之间有一次投篮嫌疑"） | `coarse_frames` / `coarse_detections_*` | `ball_tracks` / `player_detections_by_frame` / `shot_candidate_windows[]` (每个 candidate 有 start/end 秒) | 15 ~ 60% |
-| **3** | **Fine Verification**<br/>(→ stage 变 "Verifying") | **只对每个 ShotCandidate 的时间窗口提采样率**（粗采样 2fps → 精采样 15fps）。做：<br/>1. 球的精细轨迹<br/>2. 与篮筐平面的交点（穿过了吗？）<br/>3. 球继续下落 + 在篮筐区域内短暂消失（空心/擦板进球的典型特征） | `shot_candidate_windows[]` | `verified_candidates[]`（每个有 `is_made_basket: bool` + 分项证据） | 60 ~ 85% |
-| **4** | **Confidence Scoring**<br/>(Verifying 继续) | 分项打分 → 综合 confidence（0~1）：<br/>- 抛物线平滑度（球有没有突然瞬移，没有说明是真实球不是误检）<br/>- 球与篮筐中心的最小距离<br/>- 球消失的时机（是否刚好在穿过篮筐平面后）<br/>- user 给没给 hoop_roi（给了的加基础分） | `verified_candidates[]` 的证据字段 | 每个 candidate 写入 `confidence` + `metadata{ sub_scores }` | 85 ~ 90% |
-| **5** | **Deduplication**<br/>(Verifying 继续) | 事件聚类去重：<br/>同一个进球可能被 Coarse 阶段连续 2~3 帧各触发一次候选，最终产生 startTime 相差 0.2s 的 3 条记录。<br/>做法：IoU ≥ 0.7 或 时间差 < 1.5s 的 N 条合并，取 confidence 最高的那条保留 | `verified_candidates[]`（含重复） | `deduplicated_candidates[]`（去重后） | 90 ~ 93% |
-| **6** | **Clip Generation (Index)**<br/>(→ stage 变 "GeneratingClips") | **注意：MVP 阶段这里不真跑 FFmpeg**（省存储 + 省时间）。<br/>只生成索引：<br/>`startTimeSec = eventTimeSec - 5s`（进球前 5 秒）<br/>`endTimeSec   = eventTimeSec + 3s`（进球后 3 秒）<br/>真的剪视频等用户点 Export 的时候再做。 | `deduplicated_candidates[]` | `highlights[]`（每条有 startTime/endTime/eventTime/confidence/type=MADE_BASKET） | 93 ~ 99% |
-| **7** | **Persist**<br/>(→ READY / FAILED) | 1. `POST /v1/videos/:id/highlights/bulk`（带 X-Internal-Token）批量写回 Node API<br/>&nbsp;&nbsp;→ 后端事务两阶段：先软删该 video 所有旧 highlights → 再 createMany 新的<br/>2. `PATCH /v1/jobs/:id` 把 status=READY progress=1.0<br/>（如果中间任一步抛异常就 PATCH status=FAILED + errorMessage） | `highlights[]` | API 端 DB 落库成功；PipelineContext 全部持久化完成 | 99 ~ 100% |
+| Stage # | 名称（对应 ProcessingJob.stage 值）                            | 做什么                                                                                                                                                                                                                                                                                              | 输入（读 PipelineContext 的字段）         | 输出（写 PipelineContext 的字段）                                                                          | 大约占总进度 |
+| ------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------ |
+| **0**   | **Preparing**                                                  | 1. 从 R2 下载源视频到 `/tmp`（或者 `--local-video` 直接用本地路径）<br/>2. `ffprobe` 拿 fps / width / height / duration / codec<br/>3. 校验视频可读（corrupt 的直接抛错 FAILED）                                                                                                                    | `storageKey` / `local_video_path`         | `video_path` / `fps` / `width` / `height` / `total_frames` / `duration_sec`                                | 0 ~ 5%       |
+| **1**   | **Coarse Sampling**<br/>(→ stage 文案变 "Detecting")           | 1. **低 FPS 均匀抽帧**（比如原视频 30fps → 抽 2fps，处理量直接砍到 1/15，省钱关键）<br/>2. 如果用户给了 `hoop_roi`（校准页面画的篮筐框），只用 ROI 区域做检测，再砍 ~80% 计算量                                                                                                                     | `video_path` / `fps` / `hoop_roi`（可选） | `coarse_frames` (list[numpy]) / `coarse_frame_indices` / `coarse_timestamps`                               | 5 ~ 15%      |
+| **2**   | **Candidate Detection**<br/>(Detecting 继续)                   | 1. PlayerDetector / BallDetector 跑一遍 coarse 帧<br/>2. BallTracker.update(detections) → 得到球的轨迹（track_id 连续）<br/>3. 基于：**球突然向上 → 抛物线顶点 → 靠近 hoop bbox** → 提取出若干个 **时间候选窗口**（比如 "第 42s~48s 之间有一次投篮嫌疑"）                                           | `coarse_frames` / `coarse_detections_*`   | `ball_tracks` / `player_detections_by_frame` / `shot_candidate_windows[]` (每个 candidate 有 start/end 秒) | 15 ~ 60%     |
+| **3**   | **Fine Verification**<br/>(→ stage 变 "Verifying")             | **只对每个 ShotCandidate 的时间窗口提采样率**（粗采样 2fps → 精采样 15fps）。做：<br/>1. 球的精细轨迹<br/>2. 与篮筐平面的交点（穿过了吗？）<br/>3. 球继续下落 + 在篮筐区域内短暂消失（空心/擦板进球的典型特征）                                                                                     | `shot_candidate_windows[]`                | `verified_candidates[]`（每个有 `is_made_basket: bool` + 分项证据）                                        | 60 ~ 85%     |
+| **4**   | **Confidence Scoring**<br/>(Verifying 继续)                    | 分项打分 → 综合 confidence（0~1）：<br/>- 抛物线平滑度（球有没有突然瞬移，没有说明是真实球不是误检）<br/>- 球与篮筐中心的最小距离<br/>- 球消失的时机（是否刚好在穿过篮筐平面后）<br/>- user 给没给 hoop_roi（给了的加基础分）                                                                       | `verified_candidates[]` 的证据字段        | 每个 candidate 写入 `confidence` + `metadata{ sub_scores }`                                                | 85 ~ 90%     |
+| **5**   | **Deduplication**<br/>(Verifying 继续)                         | 事件聚类去重：<br/>同一个进球可能被 Coarse 阶段连续 2~3 帧各触发一次候选，最终产生 startTime 相差 0.2s 的 3 条记录。<br/>做法：IoU ≥ 0.7 或 时间差 < 1.5s 的 N 条合并，取 confidence 最高的那条保留                                                                                                 | `verified_candidates[]`（含重复）         | `deduplicated_candidates[]`（去重后）                                                                      | 90 ~ 93%     |
+| **6**   | **Clip Generation (Index)**<br/>(→ stage 变 "GeneratingClips") | **注意：MVP 阶段这里不真跑 FFmpeg**（省存储 + 省时间）。<br/>只生成索引：<br/>`startTimeSec = eventTimeSec - 5s`（进球前 5 秒）<br/>`endTimeSec   = eventTimeSec + 3s`（进球后 3 秒）<br/>真的剪视频等用户点 Export 的时候再做。                                                                    | `deduplicated_candidates[]`               | `highlights[]`（每条有 startTime/endTime/eventTime/confidence/type=MADE_BASKET）                           | 93 ~ 99%     |
+| **7**   | **Persist**<br/>(→ READY / FAILED)                             | 1. `POST /v1/videos/:id/highlights/bulk`（带 X-Internal-Token）批量写回 Node API<br/>&nbsp;&nbsp;→ 后端事务两阶段：先软删该 video 所有旧 highlights → 再 createMany 新的<br/>2. `PATCH /v1/jobs/:id` 把 status=READY progress=1.0<br/>（如果中间任一步抛异常就 PATCH status=FAILED + errorMessage） | `highlights[]`                            | API 端 DB 落库成功；PipelineContext 全部持久化完成                                                         | 99 ~ 100%    |
 
 **Pipeline 执行伪代码（在 `pipeline/pipeline.py` 里）：**
+
 ```python
 ctx = PipelineContext(video_id=..., storage_key=...)
 
@@ -208,6 +211,7 @@ return ctx.highlights
 > 核心 5 个 dataclass，理解了它们就等于理解了 Pipeline 90% 的数据流向。
 
 ### 5.1 `PipelineContext` —— 贯穿 8 个 Stage 的「共享黑板」
+
 ```python
 @dataclass
 class PipelineContext:
@@ -248,6 +252,7 @@ class PipelineContext:
 ```
 
 ### 5.2 `Detection` —— 单帧单次目标检测结果
+
 ```python
 @dataclass
 class Detection:
@@ -259,6 +264,7 @@ class Detection:
 ```
 
 ### 5.3 `TrackedObject` —— SORT 追踪器输出的「连续轨迹」
+
 ```python
 @dataclass
 class TrackedObject:
@@ -272,6 +278,7 @@ class TrackedObject:
 ```
 
 ### 5.4 `Roi` —— 用户校准画的区域
+
 ```python
 @dataclass
 class Roi:
@@ -282,6 +289,7 @@ class Roi:
 ```
 
 ### 5.5 `HighlightCandidate` —— 最终要写回 DB 的一条进球
+
 ```python
 @dataclass
 class HighlightCandidate:
@@ -299,33 +307,35 @@ class HighlightCandidate:
 
 对应任务 0.4。**两端 API_INTERNAL_TOKEN 必须字节级一致**。
 
-| 变量名 | 必填 | 示例值 | 说明 |
-|--------|------|--------|------|
-| `PYTHON_ENV` | 否 | `development` | 决定 loguru 彩色还是 JSON |
-| `LOG_LEVEL` | 否 | `INFO` / `DEBUG` | 开发 DEBUG 可以看每个 frame 的检测 |
-| `API_BASE_URL` | **是** | `http://127.0.0.1:4000/v1` | Node API 的内部地址（回写 PATCH/POST 用） |
-| `API_INTERNAL_TOKEN` | **是** | 长随机字符串 | ⚠️ Hard Constraint：必须和 `services/api/.env.local` 里完全一样 |
-| `REDIS_URL` | **是** | `redis://default:xxx@127.0.0.1:6379/0` | 本地 docker 或 Upstash，队列在哪里就指哪里 |
-| `QUEUE_PROCESSING_NAME` | 否 | `video-processing` | 和 Node 端 BullMQ 同一个 Redis key，不要改 |
-| `QUEUE_EXPORT_NAME` | 否 | `video-export` | 同上 |
-| `STORAGE_PROVIDER` | **是** | `s3` / `r2` | 两个都可以，MinIO 也是 S3 兼容 |
-| `STORAGE_ENDPOINT` | **是** | R2 就填 Cloudflare 给的；本地 MinIO 就 `http://127.0.0.1:9000` | S3 官方 AWS 留空 |
-| `STORAGE_REGION` | **是** | R2 填 `auto`；MinIO 随便填 `us-east-1` | |
-| `STORAGE_ACCESS_KEY_ID` | **是** | R2 / MinIO 的 Access Key | |
-| `STORAGE_SECRET_ACCESS_KEY` | **是** | R2 / MinIO 的 Secret Key | |
-| `STORAGE_BUCKET_SOURCE` | 否 | `shoot-the-ball-source` | 源视频桶，和 API 端一致 |
-| `STORAGE_BUCKET_EXPORTS` | 否 | `shoot-the-ball-exports` | 导出桶，和 API 端一致 |
-| `AI_TORCH_BACKEND` | 否 | `auto` / `mps` / `cpu` / `cuda` | auto 会按 MPS→CUDA→CPU 顺序探测 |
-| `AI_CONFIDENCE_THRESHOLD` | 否 | `0.25`（默认） | YOLO 单帧 detection 的最小置信度，调太低 = 误检多；调太高 = 漏检多 |
-| `AI_DEMO_MODE` | 否 | `true` / 留空 | 开发阶段设 true：跳过 YOLO 直接假数据，省 99% 时间 |
-| `TEMP_DIR` | 否 | `/tmp` | 下载源视频 + 中间帧的目录，本地可改 `./tmp` 方便看 |
+| 变量名                      | 必填   | 示例值                                                         | 说明                                                               |
+| --------------------------- | ------ | -------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `PYTHON_ENV`                | 否     | `development`                                                  | 决定 loguru 彩色还是 JSON                                          |
+| `LOG_LEVEL`                 | 否     | `INFO` / `DEBUG`                                               | 开发 DEBUG 可以看每个 frame 的检测                                 |
+| `API_BASE_URL`              | **是** | `http://127.0.0.1:4321/v1`                                     | Node API 的内部地址（回写 PATCH/POST 用）                          |
+| `API_INTERNAL_TOKEN`        | **是** | 长随机字符串                                                   | ⚠️ Hard Constraint：必须和 `services/api/.env.local` 里完全一样    |
+| `REDIS_URL`                 | **是** | `redis://default:xxx@127.0.0.1:6379/0`                         | 本地 docker 或 Upstash，队列在哪里就指哪里                         |
+| `QUEUE_PROCESSING_NAME`     | 否     | `video-processing`                                             | 和 Node 端 BullMQ 同一个 Redis key，不要改                         |
+| `QUEUE_EXPORT_NAME`         | 否     | `video-export`                                                 | 同上                                                               |
+| `STORAGE_PROVIDER`          | **是** | `s3` / `r2`                                                    | 两个都可以，MinIO 也是 S3 兼容                                     |
+| `STORAGE_ENDPOINT`          | **是** | R2 就填 Cloudflare 给的；本地 MinIO 就 `http://127.0.0.1:9000` | S3 官方 AWS 留空                                                   |
+| `STORAGE_REGION`            | **是** | R2 填 `auto`；MinIO 随便填 `us-east-1`                         |                                                                    |
+| `STORAGE_ACCESS_KEY_ID`     | **是** | R2 / MinIO 的 Access Key                                       |                                                                    |
+| `STORAGE_SECRET_ACCESS_KEY` | **是** | R2 / MinIO 的 Secret Key                                       |                                                                    |
+| `STORAGE_BUCKET_SOURCE`     | 否     | `shoot-the-ball-source`                                        | 源视频桶，和 API 端一致                                            |
+| `STORAGE_BUCKET_EXPORTS`    | 否     | `shoot-the-ball-exports`                                       | 导出桶，和 API 端一致                                              |
+| `AI_TORCH_BACKEND`          | 否     | `auto` / `mps` / `cpu` / `cuda`                                | auto 会按 MPS→CUDA→CPU 顺序探测                                    |
+| `AI_CONFIDENCE_THRESHOLD`   | 否     | `0.25`（默认）                                                 | YOLO 单帧 detection 的最小置信度，调太低 = 误检多；调太高 = 漏检多 |
+| `AI_DEMO_MODE`              | 否     | `true` / 留空                                                  | 开发阶段设 true：跳过 YOLO 直接假数据，省 99% 时间                 |
+| `TEMP_DIR`                  | 否     | `/tmp`                                                         | 下载源视频 + 中间帧的目录，本地可改 `./tmp` 方便看                 |
 
 ---
 
 ## 7. 调试小抄 & 常见坑
 
 ### Q1: `ERROR    Failed to load yolov8n.pt` 或下载权重卡
+
 **Fix**: 手动下权重到缓存目录：
+
 ```bash
 mkdir -p ~/.cache/ultralytics
 curl -L -o ~/.cache/ultralytics/yolov8n.pt \
@@ -333,16 +343,21 @@ curl -L -o ~/.cache/ultralytics/yolov8n.pt \
 ```
 
 ### Q2: MPS 下第一次跑 PyTorch 特别慢（10~30s 没动静）
+
 不是卡了，是第一次运行在**后台编译 Metal shader**（MPS 的 JIT 特性）。跑完一次后会缓存到 `~/Library/Application Support/`，后续就秒开了。
 
 ### Q3: `ffprobe` 报 "File ended before MOOV atom" — 视频上传了一半 / corrupt
+
 解决：上传阶段客户端 PUT 没完成就别调 complete。API 端的 `POST /v1/videos/:id/complete` 必须 HeadObject 校验真实 sizeBytes，这是 Hard Constraint。
 
 ### Q4: AI Worker 发 `PATCH /jobs/:id` 老是 403 Forbidden
+
 99% 的情况是 **两端 `API_INTERNAL_TOKEN` 不一致**。用 0.3 / 0.4 的 env probe 命令分别查 API 端和 Worker 端的 token 前 8 个字符，必须完全相同。
 
 ### Q5: BallDetector 老检测不到球（球太小 / 分辨率太低）
+
 两个办法：
+
 1. MVP 建议**用户上传前把视频缩放到 720p 以上**（在 Web 端用 ffmpeg.wasm 做，或者文档里提醒）
 2. 调低 `AI_CONFIDENCE_THRESHOLD` 从 0.25 → 0.15，配合 dedup 阶段去误检
 3. 后续 Phase 6 做专门的 basketball-scene 微调模型（COCO 的 "sports ball" 是通用球类，篮球识别不稳定）

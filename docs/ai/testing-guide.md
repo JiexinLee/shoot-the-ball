@@ -218,7 +218,7 @@ docker compose up -d redis     # 不需要 postgres，只要 redis
 cd services/api
 pnpm install
 pnpm db:generate && pnpm db:migrate
-pnpm dev  # http://localhost:4000
+pnpm dev  # http://localhost:4321
 ```
 
 ### 5.2 启动 Worker（监听队列）
@@ -227,7 +227,7 @@ pnpm dev  # http://localhost:4000
 cd services/ai-worker
 AI_WORKER_MODE=all \
 REDIS_URL=redis://127.0.0.1:6379/0 \
-API_BASE_URL=http://127.0.0.1:4000/v1 \
+API_BASE_URL=http://127.0.0.1:4321/v1 \
 poetry run python -m app.worker
 ```
 

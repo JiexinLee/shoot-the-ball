@@ -165,7 +165,7 @@ jobs:
       - name: Build Web (Next.js production build)
         working-directory: apps/web
         env:
-          NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:4000/v1
+          NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:4321/v1
         run: pnpm build
 
   # ------------------------------------------------------------------

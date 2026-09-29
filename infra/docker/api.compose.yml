@@ -13,4 +13,4 @@ services:
       - STORAGE_ACCESS_KEY_ID
       - STORAGE_SECRET_ACCESS_KEY
     ports:
-      - "4000:4000"
+      - "4321:4321"

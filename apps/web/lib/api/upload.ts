@@ -210,7 +210,10 @@ export type UploadSessionCompatResponse = {
   uploadExpiresInSec: number;
 };
 
-/** VideoUploader 旧命名：createUploadSession → api.videos.createUploadSession。字段别名 sizeBytes→size。 */
+/** VideoUploader 旧命名：createUploadSession → api.videos.createUploadSession。
+ *  字段别名兼容：入参 sizeBytes → contracts size；
+ *  出参用真实后端给的 uploadMethod / uploadExpiresInSec，不再硬编码默认值。
+ */
 export async function createUploadSession(
   args: UploadSessionCompatArgs,
 ): Promise<UploadSessionCompatResponse> {
@@ -224,8 +227,8 @@ export async function createUploadSession(
     videoId: raw.videoId,
     storageKey: raw.storageKey,
     uploadUrl: raw.uploadUrl,
-    uploadMethod: "PUT",
-    uploadExpiresInSec: 1800,
+    uploadMethod: raw.uploadMethod ?? "PUT",
+    uploadExpiresInSec: raw.uploadExpiresInSec ?? 1800,
   };
 }
 

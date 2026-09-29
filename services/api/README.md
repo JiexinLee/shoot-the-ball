@@ -10,20 +10,20 @@
 
 ## 🎯 当前阶段已实现的接口
 
-| Method | Path | 说明 | 调用方 |
-|---|---|---|---|
-| POST | `/v1/videos/upload-session` | 创建视频记录 + 返回 PUT 预签名上传 URL（**Direct Upload**） | 前端/客户端 |
-| POST | `/v1/videos/:id/complete` | 通知服务端文件已传完 → HeadObject 校验 → 写 metadata → `UPLOADED` | 前端/客户端 |
-| POST | `/v1/videos/:id/calibration` | 保存用户框的 hoop/court ROI（桩实现） | 前端/客户端 |
-| POST | `/v1/videos/:id/process` | 建 ProcessingJob + 入 BullMQ 队列 → 返回 jobId（Python Worker 消费） | 前端/客户端 |
-| GET  | `/v1/videos/:id` | 视频详情 + 当前 job 状态 + 源视频临时下载签名 URL | 前端/客户端 |
-| GET  | `/v1/videos/:id/highlights` | 取 highlights 列表（按 eventTime 升序） | 前端/客户端 |
-| POST | `/v1/videos/:id/highlights/bulk` | **内部接口**：AI Worker 把识别结果批量写回 DB（X-Internal-Token 校验） | ai-worker |
-| GET  | `/v1/jobs/:id` | 一次性查任务状态 | 前端/客户端 |
-| GET  | `/v1/jobs/:id/events` | **SSE 长连接**：每 1.5s 轮询 DB 推 `progress` / `completed` / `failed` / `heartbeat` 事件 | 前端/客户端 |
-| PATCH | `/v1/jobs/:id` | **内部接口**：AI Worker 实时回写 stage/progress | ai-worker |
-| GET  | `/healthz` | K8s/LB 探活（无鉴权、极简） | 运维 |
-| GET  | `/v1/health` | 业务健康检查（已在 routes/index.ts 里） | 通用 |
+| Method | Path                             | 说明                                                                                      | 调用方      |
+| ------ | -------------------------------- | ----------------------------------------------------------------------------------------- | ----------- |
+| POST   | `/v1/videos/upload-session`      | 创建视频记录 + 返回 PUT 预签名上传 URL（**Direct Upload**）                               | 前端/客户端 |
+| POST   | `/v1/videos/:id/complete`        | 通知服务端文件已传完 → HeadObject 校验 → 写 metadata → `UPLOADED`                         | 前端/客户端 |
+| POST   | `/v1/videos/:id/calibration`     | 保存用户框的 hoop/court ROI（桩实现）                                                     | 前端/客户端 |
+| POST   | `/v1/videos/:id/process`         | 建 ProcessingJob + 入 BullMQ 队列 → 返回 jobId（Python Worker 消费）                      | 前端/客户端 |
+| GET    | `/v1/videos/:id`                 | 视频详情 + 当前 job 状态 + 源视频临时下载签名 URL                                         | 前端/客户端 |
+| GET    | `/v1/videos/:id/highlights`      | 取 highlights 列表（按 eventTime 升序）                                                   | 前端/客户端 |
+| POST   | `/v1/videos/:id/highlights/bulk` | **内部接口**：AI Worker 把识别结果批量写回 DB（X-Internal-Token 校验）                    | ai-worker   |
+| GET    | `/v1/jobs/:id`                   | 一次性查任务状态                                                                          | 前端/客户端 |
+| GET    | `/v1/jobs/:id/events`            | **SSE 长连接**：每 1.5s 轮询 DB 推 `progress` / `completed` / `failed` / `heartbeat` 事件 | 前端/客户端 |
+| PATCH  | `/v1/jobs/:id`                   | **内部接口**：AI Worker 实时回写 stage/progress                                           | ai-worker   |
+| GET    | `/healthz`                       | K8s/LB 探活（无鉴权、极简）                                                               | 运维        |
+| GET    | `/v1/health`                     | 业务健康检查（已在 routes/index.ts 里）                                                   | 通用        |
 
 未实现的接口已在对应文件里打 `// TODO(...)` 注释。
 
@@ -62,7 +62,7 @@ cp .env.example .env.local
 NODE_ENV=development
 APP_ENV=development
 
-API_PORT=4000
+API_PORT=4321
 API_HOST=127.0.0.1
 API_PREFIX=/v1
 API_CORS_ORIGIN=*    # 开发用 *，生产要写具体域名
@@ -109,12 +109,12 @@ pnpm db:seed           # 可选：塞一个默认 Project + dev 用户（没有�
 pnpm dev               # tsx watch 热更新
 ```
 
-默认监听 `http://127.0.0.1:4000`。
+默认监听 `http://127.0.0.1:4321`。
 
 快速验活：
 
 ```bash
-curl -s http://127.0.0.1:4000/healthz
+curl -s http://127.0.0.1:4321/healthz
 # 期望：{"status":"ok","ts":...}
 ```
 
@@ -123,7 +123,7 @@ curl -s http://127.0.0.1:4000/healthz
 ## 🔗 上传 → AI 分析 链路时序图
 
 ```
- 客户端 (Flutter/Web)               API (4000)                 BullMQ/Redis               ai-worker (Python)           S3/R2
+ 客户端 (Flutter/Web)               API (4321)                 BullMQ/Redis               ai-worker (Python)           S3/R2
 ──────────────────────        ────────────────────        ──────────────────         ──────────────────────        ────────
        │                            │                           │                           │                        │
        │ ① POST /v1/projects        │                           │                           │                        │
@@ -176,7 +176,7 @@ curl -s http://127.0.0.1:4000/healthz
 先准备一个叫 `game.mp4` 的小视频。下面脚本里的 `PROJECT_ID` 先用 `POST /v1/projects` 建一个。
 
 ```bash
-API=http://127.0.0.1:4000/v1
+API=http://127.0.0.1:4321/v1
 
 # 0. 建一个 Project（没建过项目才需要）
 PROJECT_ID=$(curl -s -X POST $API/projects -H 'Content-Type: application/json' \
@@ -219,17 +219,17 @@ curl -sS $API/videos/$VIDEO_ID/highlights | jq '.highlights | length'
 
 ## 🧯 安全/日志设计要点
 
-| 主题 | 实现位置 | 说明 |
-|---|---|---|
-| 鉴权 | `modules/auth/auth.middleware.ts` | 3 层：内部 X-Internal-Token → 开发 DEV_BYPASS_AUTH → 正常 JWT Bearer。优先级从高到低。 |
-| CORS | `main.ts` cors() | 开发 `*`，生产逗号分隔白名单；暴露 X-Request-Id 头。 |
-| 安全响应头 | `main.ts` helmet() | CSP / X-Frame / HSTS / no-sniff / crossOriginResourcePolicy 等；媒体资源允许 `https:` 直连 R2/S3。 |
-| body 大小限制 | `main.ts` express.json | JSON 50MB、urlencoded 10MB（给 highlights/bulk 留余量），视频不会走 body。 |
-| 请求链路 ID | `main.ts` 中间件 + morgan `:id` token | 每个请求分配 `X-Request-Id`，access log 里能对应到 pino logger 上下文，排错时跨 Python/Node/前端能对齐 ID。 |
-| 结构化日志 | `config/logger.ts` pino | 开发 `pino-pretty` 彩色，生产纯 JSON，可直接喂 Datadog / BetterStack / CloudWatch。 |
-| SSE 断开保护 | `jobs.routes.ts` | 1.5s DB 轮询 + 25s 心跳 + 10 分钟 max-connection，避免内存/DB 连接泄漏。 |
-| 参数校验 | 每个 router 里的 zod schema | 所有输入严格校验：扩展名白名单、size 上限、数字范围。拒绝后返回 `400 { error, details }` 而不是模糊 500。 |
-| 内部接口保护 | `PATCH /jobs/:id` 等 | 仅允许 `user_internal_ai_worker` 调用；`highlights/bulk` 也区分 internal 调用权限。 |
+| 主题          | 实现位置                              | 说明                                                                                                        |
+| ------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 鉴权          | `modules/auth/auth.middleware.ts`     | 3 层：内部 X-Internal-Token → 开发 DEV_BYPASS_AUTH → 正常 JWT Bearer。优先级从高到低。                      |
+| CORS          | `main.ts` cors()                      | 开发 `*`，生产逗号分隔白名单；暴露 X-Request-Id 头。                                                        |
+| 安全响应头    | `main.ts` helmet()                    | CSP / X-Frame / HSTS / no-sniff / crossOriginResourcePolicy 等；媒体资源允许 `https:` 直连 R2/S3。          |
+| body 大小限制 | `main.ts` express.json                | JSON 50MB、urlencoded 10MB（给 highlights/bulk 留余量），视频不会走 body。                                  |
+| 请求链路 ID   | `main.ts` 中间件 + morgan `:id` token | 每个请求分配 `X-Request-Id`，access log 里能对应到 pino logger 上下文，排错时跨 Python/Node/前端能对齐 ID。 |
+| 结构化日志    | `config/logger.ts` pino               | 开发 `pino-pretty` 彩色，生产纯 JSON，可直接喂 Datadog / BetterStack / CloudWatch。                         |
+| SSE 断开保护  | `jobs.routes.ts`                      | 1.5s DB 轮询 + 25s 心跳 + 10 分钟 max-connection，避免内存/DB 连接泄漏。                                    |
+| 参数校验      | 每个 router 里的 zod schema           | 所有输入严格校验：扩展名白名单、size 上限、数字范围。拒绝后返回 `400 { error, details }` 而不是模糊 500。   |
+| 内部接口保护  | `PATCH /jobs/:id` 等                  | 仅允许 `user_internal_ai_worker` 调用；`highlights/bulk` 也区分 internal 调用权限。                         |
 
 ---
 
