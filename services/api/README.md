@@ -217,6 +217,68 @@ curl -sS $API/videos/$VIDEO_ID/highlights | jq '.highlights | length'
 
 ---
 
+## 🧱 代码分层架构（Domain-Driven 3-Layer）
+
+每个业务 domain（`videos` / `projects` / `highlights` / `jobs` / `exports` / `auth`）在 `src/modules/<domain>/` 下按以下结构拆分，禁止把 handler / 业务逻辑 / SQL 写在同一个文件：
+
+```
+src/modules/videos/
+├── videos.routes.ts              ← 汇总入口：Router() + requireAuth + 按顺序 register 所有 handlers（只干这个，<50 行）
+├── videos.utils.ts               ← 纯函数 helper（共享给 service，不依赖 Express / Prisma）
+├── handlers/                     ← 路由处理层
+│   ├── createUploadSession.ts    ← POST /upload-session ：只做 zod 校验 → 调 service → 按 error.code 映射 HTTP 状态码
+│   ├── completeUploadById.ts     ← POST /:id/complete
+│   ├── calibrateVideoById.ts     ← POST /:id/calibration
+│   ├── processVideoById.ts       ← POST /:id/process
+│   ├── bulkWriteHighlightsById.ts← POST /:id/highlights/bulk（内部接口）
+│   ├── getVideoHighlightsById.ts ← GET  /:id/highlights
+│   └── getVideoById.ts           ← GET  /:id
+├── services/                     ← 业务逻辑层（唯一允许编排"多步业务动作"的地方）
+│   ├── upload.service.ts         ← createUploadSession + completeUpload；export ServiceResult<T>
+│   ├── calibration.service.ts    ← saveCalibration
+│   ├── processing.service.ts     ← startProcessing（Mock 分支 + BullMQ 分支；事务性写 processingJob + highlight）
+│   ├── highlights.service.ts     ← bulkWriteHighlights + getVideoHighlights（权限：internal user vs owner）
+│   └── videos.service.ts         ← getVideoById（详情 + 预签名下载 URL）
+└── repositories/                 ← 数据访问层（只封装 Prisma 读写，绝对不出现 if/业务判断）
+    ├── projects.repository.ts    ← findByIdAndUserId
+    ├── videos.repository.ts      ← findById / findByIdAndUserId / findByIdWithProcessingJob / create / update
+    ├── processingJobs.repository.ts ← findRunningJobByVideoId / create / update
+    └── highlights.repository.ts  ← countByVideoId / listActiveByVideoId / softDeleteAndCreateMany / createInTransaction
+```
+
+### 依赖方向（单向，禁止反向）
+
+```
+ handlers → services → repositories → Prisma
+    │           │            │
+    │           └──────► videos.utils.ts（纯函数，零副作用）
+    └── Express Request / Response 只在这里出现，绝不带到 service/repository
+```
+
+### 关键约束（硬规则）
+
+| 层           | 可以直接 import                                                                              | 绝对禁止                                                  |
+| ------------ | -------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| handlers     | Router / Express types / `../services/*.service.ts` / zod schemas（从 service 拿）           | `import { prisma }` / 写业务 if / 拼 Prisma where         |
+| services     | `../repositories/*.repository.ts` / storage / jobs / env / logger / zod（schema 定义在这里） | `import { prisma }` / `import type { Request, Response }` |
+| repositories | `../../../db/prisma`（= prisma 单例） + Prisma generated types                               | 任何业务 if（"status === FAILED" 这种必须在 service 写）  |
+
+### Service 返回协议：`ServiceResult<T>`
+
+所有 `*.service.ts` 的公共方法返回 `Promise<ServiceResult<T>>`：
+
+```ts
+type ServiceResult<T> = { ok?: T; error?: { code: number; message: string } };
+```
+
+好处：
+
+- handler 层无脑写 `if (result.error) return res.status(result.error.code).json(...)`，不再需要到处 try/catch
+- 业务错误（404 / 409）在 service 层统一建模，将来切换到 tRPC / gRPC 也不用改 service
+- 单元测试 service 时不需要 mock Express Response
+
+---
+
 ## 🧯 安全/日志设计要点
 
 | 主题          | 实现位置                              | 说明                                                                                                        |

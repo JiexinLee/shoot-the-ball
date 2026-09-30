@@ -1,4 +1,9 @@
 import "express-async-errors";
+import { installGlobalBigIntJsonPatch } from "./utils/serialize";
+// 全局 BigInt JSON 补丁：必须放在所有业务 import 之前，确保任何 JSON.stringify 都不会
+// 因为 Postgres BIGINT 被 Prisma 读成 JS BigInt 就炸 500。
+installGlobalBigIntJsonPatch();
+
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";

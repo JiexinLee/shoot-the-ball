@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 import { cleanEnv, host, port, str, num, bool, makeValidator } from "envalid";
 
-dotenv.config({ path: [".env.local", ".env", "../../.env"] });
+dotenv.config({ path: ["../../.env"] });
 
 // =========================================================================
 // 自定义 Validator（关键修复点）
@@ -105,6 +105,32 @@ const _schema = {
   STORAGE_PRESIGNED_UPLOAD_TTL: num({ default: 1800 }),
   /** 预签名 GET URL TTL（秒） */
   STORAGE_PRESIGNED_DOWNLOAD_TTL: num({ default: 3600 }),
+
+  // ---------- Dev Mock Mode ----------
+  /**
+   * 开发阶段可开启：跳过真实 R2 直传 + HeadObject 校验。
+   *   - upload-session 返回假的 mock:// 开头的 uploadUrl
+   *   - complete 阶段不调 headObject，直接信任 DB 里的 sizeBytes 当真实值。
+   * 目的：MVP 早期跑通前端 → API → DB → 队列 全链路，不被 R2 CORS / 凭据卡住。
+   * 生产环境必须保持 false（Hard Safety：否则任何用户瞎调 complete 就能伪造上传记录）。
+   */
+  DEV_MOCK_STORAGE: bool({ default: false }),
+  /**
+   * 开发阶段默认开：MVP 早期 Python AI Worker 还没写好 / 没启动时，
+   * POST /videos/:id/process 接口不会真的 enqueue 进 BullMQ，
+   * 而是直接把 ProcessingJob → READY 并插入 3 条假 highlights。
+   * 好处：
+   *   - 前端上传 → process 成功，GET /videos/:id/highlights 能直接看到假卡片渲染
+   *   - GET /jobs/:id/events 订阅时一上来就是 READY，立刻 SSE end，
+   *     不会 1500ms 轮询刷爆 Prisma SELECT
+   *   - 不需要起任何额外进程 / Worker，API + Web 就跑通 MVP
+   * 切真 AI Worker 时：
+   *   1. 启动 services/ai-worker（Python，消费同一条 video-processing 队列）
+   *   2. 在根 .env 把此变量改成 false，重启 API
+   *   3. /:id/process 自动改走 enqueueProcessingJob → BullMQ → ai-worker
+   * 生产 Hard Safety：仅 APP_ENV=development 时此变量生效；生产即便改 true 也会被忽略。
+   */
+  DEV_MOCK_PROCESSING: bool({ default: true }),
 
   // ---------- BullMQ ----------
   BULLMQ_CONCURRENCY: num({ default: 2 }),

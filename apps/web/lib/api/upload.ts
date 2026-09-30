@@ -139,11 +139,64 @@ export type UploadToPresignedArgs = {
  * 用 XMLHttpRequest 而不是 fetch 做 PUT：
  *   fetch Request.body 没有 upload progress 事件，xhr.upload.onprogress 才有。
  *   取消上传：调用方传 AbortController.signal，abort() 即可 xhr.abort()。
+ *
+ * Dev Mock 模式分支：
+ *   如果 uploadUrl 以 "mock://" 开头（后端 DEV_MOCK_STORAGE=true 时返回的假 URL），
+ *   不真的发 XHR，直接用 setTimeout 模拟 0→100 的进度条，resolve 即可。
+ *   好处：彻底绕开 Cloudflare R2 的 CORS preflight 报错，MVP 早期不用配 R2 CORS / 凭据也能跑全链路。
  */
 export function uploadToPresignedUrl(
   args: UploadToPresignedArgs,
 ): Promise<void> {
   const { uploadUrl, file, contentType, onProgress, signal } = args;
+
+  if (uploadUrl.startsWith("mock://")) {
+    return new Promise<void>((resolve, reject) => {
+      const total = file.size || 1024 * 1024;
+      const steps = 10;
+      const stepMs = Math.max(50, Math.min(300, 1200 / steps));
+      let step = 0;
+      let timerId: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (timerId) {
+          clearTimeout(timerId);
+          timerId = null;
+        }
+      };
+
+      const abortListener = () => {
+        cleanup();
+        reject(new ApiError(0, "Upload aborted by user"));
+      };
+
+      if (signal?.aborted) {
+        reject(new ApiError(0, "Upload aborted by user"));
+        return;
+      }
+      signal?.addEventListener("abort", abortListener, { once: true });
+
+      const tick = () => {
+        step++;
+        const loaded = Math.min(total, Math.floor((total * step) / steps));
+        const pct = Math.max(
+          0,
+          Math.min(100, Math.floor((loaded / total) * 100)),
+        );
+        onProgress?.(pct);
+        if (step >= steps) {
+          onProgress?.(100);
+          signal?.removeEventListener("abort", abortListener);
+          resolve();
+        } else {
+          timerId = setTimeout(tick, stepMs);
+        }
+      };
+      onProgress?.(0);
+      timerId = setTimeout(tick, stepMs);
+    });
+  }
+
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", uploadUrl, true);

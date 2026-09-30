@@ -11,7 +11,7 @@ shoot-the-ball/
 ├── apps/
 │   └── web/                    # Next.js 开发控制台 / 前端 Dashboard（黄黑主题）
 ├── services/
-│   ├── api/                    # Node.js 后端 API（Fastify + Prisma + BullMQ）
+│   ├── api/                    # Node.js 后端 API（Express + Prisma + BullMQ；按 domain 做 handlers / services / repositories 三层分层，详见 services/api/README.md）
 │   └── ai-worker/              # Python AI Worker（YOLO + ffmpeg + RQ）
 ├── packages/
 │   ├── contracts/              # TS 共享类型契约

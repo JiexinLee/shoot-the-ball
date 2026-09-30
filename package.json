@@ -27,8 +27,7 @@
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:reset": "docker compose down -v && docker compose pull && docker compose up -d",
-    "dev:env": "cp -f .env.development.local .env.local",
-    "dev:up": "pnpm run build:contracts && pnpm run dev:env && pnpm run docker:reset && sleep 8 && pnpm --filter @shoot-the-ball/api run db:push && pnpm --filter @shoot-the-ball/api run db:seed",
+    "dev:up": "pnpm run build:contracts && pnpm run docker:reset && sleep 8 && pnpm --filter @shoot-the-ball/api run db:push && pnpm --filter @shoot-the-ball/api run db:seed",
     "dev:start": "turbo run dev --filter=@shoot-the-ball/api --filter=@shoot-the-ball/web --parallel",
     "build:contracts": "pnpm --filter @shoot-the-ball/contracts build"
   },
