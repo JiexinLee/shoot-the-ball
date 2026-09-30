@@ -1,9 +1,5 @@
 export type UploadStatus =
-  | "pending"
-  | "uploading"
-  | "processing"
-  | "success"
-  | "error";
+  "pending" | "uploading" | "calibrating" | "processing" | "success" | "error";
 
 export interface UploadedVideo {
   id: string;
@@ -18,9 +14,16 @@ export interface UploadedVideo {
   durationSec?: number;
   width?: number;
   height?: number;
+  fps?: number;
   createdAt: number;
+  /** 后端 DB 主键；createSession 之前为 undefined */
   videoId?: string;
   jobId?: string;
+  /**
+   * 仅前端本地状态：SSE completed 后调 GET /videos/:id/highlights 拿到的列表，
+   * 挂在 UploadedVideo 上直接在上传页卡片底部展示，不用跳 /videos/[id]/review
+   */
+  highlights?: Highlight[];
 }
 
 export interface UploadSessionResponse {
@@ -66,7 +69,8 @@ export type JobStatus =
   | "EXPORTED"
   | "FAILED";
 
-export type HighlightType = "MADE_BASKET" | "ASSIST" | "STEAL" | "BLOCK" | "OTHER";
+export type HighlightType =
+  "MADE_BASKET" | "ASSIST" | "STEAL" | "BLOCK" | "OTHER";
 
 export type HighlightUserStatus = "PENDING" | "SELECTED" | "DELETED";
 
@@ -110,9 +114,17 @@ export interface Highlight {
   videoId: string;
   processingJobId: string;
   userId: string;
-  startTimeSec: number;
-  endTimeSec: number;
-  eventTimeSec: number;
+  /**
+   * 对齐 packages/contracts 真实 HighlightSchema：startTime/endTime/eventTime（秒，浮点数）。
+   * 旧文档里 "startTimeSec" 是命名草案，现在 contracts 定稿后统一不带 Sec 后缀，
+   * 这里带两个字段是为了向后兼容 GET 回来的旧数据，渲染时优先用不带 Sec 的。
+   */
+  startTime: number;
+  endTime: number;
+  eventTime: number;
+  startTimeSec?: number;
+  endTimeSec?: number;
+  eventTimeSec?: number;
   confidence: number;
   type: HighlightType;
   thumbnailStorageKey?: string;

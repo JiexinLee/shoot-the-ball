@@ -95,7 +95,9 @@ export function DropZone({
         ref={inputRef}
         type="file"
         accept={ACCEPTED_MIME}
-        multiple
+        /* MVP 阶段强制单文件：用户说 Modal 90% 窗口一次只处理一个视频，
+           不要 multiple，避免拖进来多个时 UX 混乱。 */
+        multiple={false}
         className="hidden"
         onChange={(e) => {
           if (e.target.files) onFilesAdded(e.target.files);

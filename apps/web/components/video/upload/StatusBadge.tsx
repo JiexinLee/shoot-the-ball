@@ -1,4 +1,4 @@
-import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Gauge, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import type { UploadStatus } from "@/lib/types";
 
 interface StatusBadgeProps {
@@ -19,6 +19,12 @@ export function StatusBadge({ status, progress }: StatusBadgeProps) {
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--primary)]">
           <Loader2 className="h-3 w-3 animate-spin" /> Uploading{" "}
           {progress.toFixed(0)}%
+        </span>
+      );
+    case "calibrating":
+      return (
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-500">
+          <Gauge className="h-3 w-3" /> Calibrating
         </span>
       );
     case "processing":
