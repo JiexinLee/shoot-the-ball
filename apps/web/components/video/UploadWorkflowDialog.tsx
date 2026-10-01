@@ -143,6 +143,10 @@ export function UploadWorkflowDialog({
    *      parent setState → 新 video 对象不会再导致依赖变化 → 死循环也从根源堵了。
    *   3. onVideoId / onUploadComplete 已经由 parent useCallback 包装，引用稳定。
    *   4. name/sizeBytes/durationSec/width/height 直接从 latestVideoRef 读，不改依赖数组。
+   * ⚠️ React 18 StrictMode 下的特殊约定：await 后的 early return 只检查 `uploadStartedForIdRef.current !== localId`，
+   *    绝对不要再加 cancelled flag 检查！因为 StrictMode 会先假 cleanup 写 cancelled=true，
+   *    但第二次 effect 因为 uploadStartedForIdRef guard 根本进不来重置 cancelled，导致真正的 run() 在 await 后静默 early return。
+   *    真实 unmount 时就算 setState 打一个 dev warning 也不影响用户，总比卡在 0% 强。
    */
   const latestVideoRef = useRef<UploadedVideo | null>(video);
   useEffect(() => {
@@ -152,9 +156,8 @@ export function UploadWorkflowDialog({
   useEffect(() => {
     if (!open || !video || stage !== "uploading") return;
     const localId = video.id;
-    if (uploadStartedForIdRef.current === localId) return; // 🔒 严格模式双跑 / 重入直接跳过
+    if (uploadStartedForIdRef.current === localId) return;
     uploadStartedForIdRef.current = localId;
-    let cancelled = false;
 
     const run = async () => {
       const v = latestVideoRef.current;
@@ -168,7 +171,7 @@ export function UploadWorkflowDialog({
           contentType,
           sizeBytes: v.sizeBytes,
         });
-        if (cancelled || uploadStartedForIdRef.current !== localId) return;
+        if (uploadStartedForIdRef.current !== localId) return;
         setSessionVideoId(session.videoId);
         onVideoId?.(localId, session.videoId);
 
@@ -183,7 +186,7 @@ export function UploadWorkflowDialog({
           onProgress: (pct) => setUploadPct(pct),
           signal: ab.signal,
         });
-        if (cancelled || uploadStartedForIdRef.current !== localId) return;
+        if (uploadStartedForIdRef.current !== localId) return;
         aborterRef.current = null;
 
         setUploadStageText("Verifying upload & saving metadata…");
@@ -193,13 +196,13 @@ export function UploadWorkflowDialog({
           width: latestVideoRef.current?.width,
           height: latestVideoRef.current?.height,
         });
-        if (cancelled || uploadStartedForIdRef.current !== localId) return;
+        if (uploadStartedForIdRef.current !== localId) return;
 
         setUploadPct(100);
         onUploadComplete?.(localId);
         setStage("calibrating");
       } catch (err) {
-        if (cancelled || uploadStartedForIdRef.current !== localId) return;
+        if (uploadStartedForIdRef.current !== localId) return;
         const m = err instanceof Error ? err.message : "Unknown upload error";
         setErrorMsg(m);
       }
@@ -207,7 +210,8 @@ export function UploadWorkflowDialog({
 
     void run();
     return () => {
-      cancelled = true;
+      // 真实 unmount / 视频真切换时尽力 abort XHR，减少带宽浪费；
+      // StrictMode 假 cleanup 虽然也会跑，但 await 后的 early return 不再看 cancelled，所以不影响功能。
       aborterRef.current?.abort();
       aborterRef.current = null;
     };

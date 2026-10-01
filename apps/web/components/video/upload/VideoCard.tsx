@@ -108,23 +108,21 @@ export function VideoCard({ video, onPreview, onRemove }: VideoCardProps) {
           </p>
         )}
 
-        {/* Highlights mini preview（页面等待 SSE completed 后就有了，直接展示 2-3 条） */}
         {video.highlights && video.highlights.length > 0 && (
-          <div className="mt-2 space-y-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-2.5">
+          <div className="mt-2 space-y-2 rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-2.5">
             <div className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-600">
-              <Film className="h-3.5 w-3.5" /> Highlights (
+              <Film className="h-3.5 w-3.5" /> Highlight Clips (
               {video.highlights.length})
             </div>
-            <ul className="space-y-1">
-              {video.highlights.slice(0, 4).map((h) => (
-                <HighlightRow key={h.id} h={h} />
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {video.highlights.map((h) => (
+                <HighlightClipPlayer
+                  key={h.id}
+                  highlight={h}
+                  previewUrl={video.previewUrl}
+                />
               ))}
-              {video.highlights.length > 4 && (
-                <li className="text-[10px] text-[var(--muted-foreground)] pl-5">
-                  +{video.highlights.length - 4} more — open Review page.
-                </li>
-              )}
-            </ul>
+            </div>
           </div>
         )}
       </CardContent>
@@ -151,72 +149,98 @@ export function VideoCard({ video, onPreview, onRemove }: VideoCardProps) {
   );
 }
 
-function HighlightRow({ h }: { h: Highlight }) {
+function HighlightClipPlayer({
+  highlight,
+  previewUrl,
+}: {
+  highlight: Highlight;
+  previewUrl: string;
+}) {
   const score =
-    typeof h.metadata?.score === "number" ? (h.metadata.score as number) : null;
+    typeof highlight.metadata?.score === "number"
+      ? (highlight.metadata.score as number)
+      : null;
   const teamSide =
-    typeof h.metadata?.teamSide === "string"
-      ? (h.metadata.teamSide as string).toUpperCase()
+    typeof highlight.metadata?.teamSide === "string"
+      ? (highlight.metadata.teamSide as string).toUpperCase()
       : null;
   /* 兼容新旧字段名：contracts 定稿是 startTime/endTime，旧本地类型是 startTimeSec */
-  const start = Number.isFinite(h.startTime)
-    ? Number(h.startTime)
-    : Number.isFinite(h.startTimeSec)
-      ? Number(h.startTimeSec)
+  const start = Number.isFinite(highlight.startTime)
+    ? Number(highlight.startTime)
+    : Number.isFinite(highlight.startTimeSec)
+      ? Number(highlight.startTimeSec)
       : 0;
-  const end = Number.isFinite(h.endTime)
-    ? Number(h.endTime)
-    : Number.isFinite(h.endTimeSec)
-      ? Number(h.endTimeSec)
-      : 0;
-  const isMock = Boolean(h.metadata?.mock);
+  const end = Number.isFinite(highlight.endTime)
+    ? Number(highlight.endTime)
+    : Number.isFinite(highlight.endTimeSec)
+      ? Number(highlight.endTimeSec)
+      : start + 5;
+  const isMock = Boolean(highlight.metadata?.mock);
+
+  /* HTML5 Media Fragment #t=start,end —— 浏览器原生 seek 到 start，
+     播放到 end 自动停。MVP 阶段就当是「已经切好的 clip」来显示，
+     以后后端 Export API 渲染好真实 mp4 后，把 src 换成预签名 URL 即可。 */
+  const fragmentSrc = `${previewUrl}#t=${start.toFixed(2)},${end.toFixed(2)}`;
+
   return (
-    <li
+    <div
       className={cn(
-        "flex items-center justify-between gap-2 rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1.5 text-[11px]",
+        "group overflow-hidden rounded-lg border bg-[var(--card)]",
+        isMock ? "border-dashed border-amber-500/40" : "border-[var(--border)]",
       )}
     >
-      <div className="flex items-center gap-1.5 min-w-0">
-        <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-[var(--primary)]" />
-        <span className="font-mono tabular-nums text-[var(--muted-foreground)]">
-          {formatDuration(start)} – {formatDuration(end)}
-        </span>
-        <span className="truncate text-[var(--foreground)]">· {h.type}</span>
-        {score && (
-          <Badge
-            variant="secondary"
-            className="h-4 px-1.5 text-[9px] bg-sky-500/10 text-sky-600"
-          >
-            {score}PT
-          </Badge>
-        )}
-        {teamSide && (
-          <Badge
-            variant="outline"
-            className={cn(
-              "h-4 px-1.5 text-[9px]",
-              teamSide === "HOME"
-                ? "border-emerald-500/40 text-emerald-600"
-                : "border-rose-500/40 text-rose-600",
-            )}
-          >
-            {teamSide}
-          </Badge>
-        )}
+      <div className="relative aspect-video w-full overflow-hidden bg-black">
+        <video
+          src={fragmentSrc}
+          muted
+          preload="metadata"
+          controls
+          className="h-full w-full object-contain"
+        />
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        {isMock && (
-          <Badge
-            variant="outline"
-            className="h-4 px-1.5 text-[9px] border-dashed border-amber-500/40 text-amber-600"
-          >
-            MOCK
-          </Badge>
-        )}
-        <span className="font-mono tabular-nums text-[var(--muted-foreground)]">
-          conf {(h.confidence * 100).toFixed(0)}%
-        </span>
+      <div className="space-y-1 p-2">
+        <div className="flex flex-wrap items-center gap-1 text-[11px]">
+          <span className="font-mono tabular-nums text-[var(--muted-foreground)]">
+            {formatDuration(start)} – {formatDuration(end)}
+          </span>
+          <span className="text-[var(--foreground)]">
+            · {highlight.type.replace(/_/g, " ")}
+          </span>
+          {score && (
+            <Badge
+              variant="secondary"
+              className="h-4 px-1.5 text-[9px] bg-sky-500/10 text-sky-600"
+            >
+              {score}PT
+            </Badge>
+          )}
+          {teamSide && (
+            <Badge
+              variant="outline"
+              className={cn(
+                "h-4 px-1.5 text-[9px]",
+                teamSide === "HOME"
+                  ? "border-emerald-500/40 text-emerald-600"
+                  : "border-rose-500/40 text-rose-600",
+              )}
+            >
+              {teamSide}
+            </Badge>
+          )}
+          {isMock && (
+            <Badge
+              variant="outline"
+              className="h-4 px-1.5 text-[9px] border-dashed border-amber-500/40 text-amber-600"
+            >
+              MOCK
+            </Badge>
+          )}
+        </div>
+        <div className="flex items-center justify-between text-[10px] font-mono tabular-nums text-[var(--muted-foreground)]">
+          <span>clip · {formatDuration(end - start)}</span>
+          <span>conf {(highlight.confidence * 100).toFixed(0)}%</span>
+        </div>
       </div>
-    </li>
+    </div>
   );
 }

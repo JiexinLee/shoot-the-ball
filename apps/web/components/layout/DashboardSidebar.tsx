@@ -20,10 +20,10 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Upload", icon: Upload },
-  { href: "/projects", label: "Projects", icon: FolderKanban },
-  { href: "/videos", label: "Videos", icon: Clapperboard },
-  { href: "/exports", label: "Exports", icon: ScissorsLineDashed },
-  { href: "/jobs", label: "Pipeline", icon: BarChart3 },
+  // { href: "/projects", label: "Projects", icon: FolderKanban },
+  // { href: "/videos", label: "Videos", icon: Clapperboard },
+  // { href: "/exports", label: "Exports", icon: ScissorsLineDashed },
+  // { href: "/jobs", label: "Pipeline", icon: BarChart3 },
 ];
 
 export function DashboardSidebar() {

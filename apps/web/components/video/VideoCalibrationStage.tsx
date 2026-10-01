@@ -308,14 +308,22 @@ export function VideoCalibrationStage({
           <Sparkles className="h-4 w-4 text-amber-500" /> Calibration Required
           Before AI Analysis
         </AlertTitle>
-        <AlertDescription className="mt-1 text-xs leading-relaxed">
-          Mark the <span className="font-semibold">hoop</span> (required) and
-          optionally the <span className="font-semibold">court</span> area so
-          the AI pipeline can skip auto-detection. Find a clear frame using the
-          timeline, switch modes with the buttons, then click twice on the video
-          (top-left → bottom-right) to draw each box.
+        <AlertDescription className="mt-1 text-sm leading-relaxed">
+          <span>Mark:</span>
+          <span className="font-semibold text-xs">
+            Hoop <span className="text-rose-500">*</span>
+          </span>
+          <span className="font-semibold text-xs">Court</span>
+          <div className="text-xs">
+            Find a clear frame using the timeline, switch modes with the
+            buttons, then click twice on the video (top-left → bottom-right) to
+            draw each box.
+          </div>
           <span className="mt-1 block text-[var(--muted-foreground)]">
-            Future: click <span className="font-mono">Auto Calibrate (AI)</span>{" "}
+            or Click{" "}
+            <span className="font-mono font-bold text-amber-300">
+              Auto Calibrate (AI)
+            </span>{" "}
             to have the ai-worker suggest initial boxes, then tweak manually.
           </span>
         </AlertDescription>
@@ -415,7 +423,7 @@ export function VideoCalibrationStage({
                 Saving&hellip;
               </>
             ) : (
-              "Save Calibration &amp; Start AI"
+              "Save Calibration & Start AI"
             )}
           </Button>
         </div>
