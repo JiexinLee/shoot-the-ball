@@ -1,13 +1,17 @@
-# 视频上传 → AI 分析 → SSE 进度推送：完整行为规范
+# 视频上传 → 校准 → AI 分析 → SSE 进度推送：完整行为规范
 
-> **文档版本**：1.0 (MVP Phase)  
-> **适用模块**：`apps/web` (Next.js 前端) ↔ `services/api` (Node.js 后端) ↔ `services/ai-worker` (Python 推理服务) ↔ Cloudflare R2 / MinIO ↔ Redis  
-> **Hard Constraints**：
+> **文档版本**：1.1 (MVP Phase, updated 2026-10-01)  
+> **适用模块**：`apps/web` (Next.js 前端) ↔ `services/api` (Node.js 后端) ↔ `services/ai-worker` (Python 推理服务) ↔ Cloudflare R2 ↔ Redis  
+> **Hard Constraints（方向性永久约束，用户已明确决策）**：
 >
-> - 所有用户界面、API 文档、错误信息、日志输出均为**纯英文**系统
-> - 视频上传必须使用 **预签名 URL Direct Upload** 方案，二进制流 **绝对不经过 API 服务中转**（节省带宽）
-> - API ↔ AI Worker 内部通信必须携带 `X-Internal-Token` 自定义请求头（Hard Constraint，不走 JWT Bearer）
-> - 视频处理进度推送必须使用 **SSE (Server-Sent Events)** 流式架构
+> 1. 所有用户界面、API 文档、错误信息、日志输出均为**纯英文**系统
+> 2. 视频上传必须使用 **预签名 URL Direct Upload** 方案，二进制流 **绝对不经过 API 服务中转**（节省带宽）
+> 3. API ↔ AI Worker 内部通信必须携带 `X-Internal-Token` 自定义请求头（Hard Constraint，不走 JWT Bearer）
+> 4. 视频处理进度推送必须使用 **SSE (Server-Sent Events)** 流式架构
+> 5. **Dev/Prod 统一使用 Cloudflare R2，不在本地起 MinIO / Docker S3 替代**（用户方案 A 决策，见 env 下方 `DEV_MOCK_STORAGE` / `DEV_MOCK_PROCESSING` 两个独立开关）
+> 6. **不要内联 Mock Worker**。本地 MVP 阶段走真 API + 真上传，AI 未接入时用 `DEV_MOCK_PROCESSING=true`（env 开关）让 API 自己把 Video/ProcessingJob 写终态并生成兜底 mock highlights；ai-worker 接好后关掉开关即可切换真调度，代码零改动（用户方向性约束）
+> 7. **Calibration MVP 仅 2 类 ROI**：`hoopRoi` 必选 + `courtRoi` 可选，球/人 ROI 以后迭代加（用户明确 4 个澄清决策之一）
+> 8. **MVP 一次只处理一个视频**：DropZone `multiple=false`，后续队列/批量处理再开
 
 ---
 
@@ -18,38 +22,47 @@ flowchart TD
     A[👤 用户拖拽或选中视频文件] --> B[📱 前端 probeVideo<br/>本地读 metadata]
     B --> C[1️⃣ POST /v1/videos/upload-session<br/>申请预签名 URL]
     C --> D[🗄️ API 写 Supabase DB<br/>status = UPLOADING]
-    D --> E[2️⃣ ✉️ 前端 PUT 到预签名 URL<br/>直传 R2 / MinIO<br/>（完全不经过 API）]
+    D --> E[2️⃣ ✉️ 前端 PUT 到预签名 URL<br/>直传 Cloudflare R2<br/>（完全不经过 API）]
     E --> F[3️⃣ POST /v1/videos/:id/complete<br/>通知 API 上传完成]
     F --> G[🔍 API 调 HeadObject<br/>**真实校验云端文件存在**<br/>⚠️ 绝不信任前端 size 参数]
     G --> H[🗄️ DB: status = UPLOADED]
-    H --> I[4️⃣ POST /v1/videos/:id/process<br/>用户发起分析]
-    I --> J[📮 API 入队 BullMQ → Redis<br/>ProcessingJob.status = PREPARING]
-    J --> K[🐍 Python AI Worker BLPOP 弹出任务]
-    K --> L[🧠 HighlightPipeline 4 阶段<br/>Prepare → Detect → Verify → Generate]
-    L --> M[5️⃣ PATCH /v1/jobs/:id<br/>X-Internal-Token 鉴权<br/>每阶段 / 每 0.5% 回写进度]
-    M --> N[6️⃣ GET /v1/jobs/:jobId/events<br/>SSE 长连接]
-    N --> O[📡 API 每 1.5s 轮询 DB<br/>每 25s 心跳包]
-    O --> P[🟢 PATCH READY + POST highlights/bulk<br/>写入精彩片段]
-    P --> Q[✅ SSE 推送 completed 事件<br/>连接关闭，卡片变绿 Ready]
+    H --> I[📐 Modal 切 Step 2: Calibrate<br/>用户点击式画 ROI 矩形<br/>hoopRoi 必选 / courtRoi 可选]
+    I --> J[3.5️⃣ POST /v1/videos/:id/calibration<br/>saveCalibration 写 Video.calibration JSON<br/>⭐ 4. process 不是前端单独按钮，是 saveCalibration 成功后自动触发]
+    J --> K[4️⃣ POST /v1/videos/:id/process<br/>自动入队分析]
+    K --> L[📮 API 入队 BullMQ → Redis<br/>ProcessingJob.status = PREPARING<br/>或 DEV_MOCK_PROCESSING=true 时 API 自己写终态]
+    L --> M[🐍 Python AI Worker BLPOP 弹出任务<br/>或 mock 直接跳过]
+    M --> N[🧠 HighlightPipeline 4 阶段<br/>Prepare → Detect → Verify → Generate]
+    N --> O[5️⃣ PATCH /v1/jobs/:id<br/>X-Internal-Token 鉴权<br/>每阶段 / 每 0.5% 回写进度]
+    O --> P[6️⃣ GET /v1/jobs/:jobId/events<br/>SSE 长连接]
+    P --> Q[📡 API 每 1.5s 轮询 DB<br/>每 25s 心跳包]
+    Q --> R[🟢 PATCH READY + POST highlights/bulk<br/>写入精彩片段]
+    R --> S[✅ SSE 推送 completed 事件<br/>连接关闭，卡片变绿 Ready]
 ```
+
+> ⚠️ **React 18 StrictMode 上传 effect 硬坑（在 `[apps/web/components/video/UploadWorkflowDialog.tsx](file:///Users/jiexinli/MyProjects/shoot-the-ball/apps/web/components/video/UploadWorkflowDialog.tsx)` 里**）：
+> useEffect 内 run() 所有 await 后的 early return guard，**永远不要再加闭包 `let cancelled` 或 `cancelledRef.current` 检查**，只允许检查 `uploadStartedForIdRef.current !== localId`。
+> 原因：StrictMode 会故意执行 `effect() → cleanup() → effect()`，第一次 cleanup 把 `cancelled=true`，但第二次 effect 被 `uploadStartedForIdRef` guard 挡住根本进不来，**永远没机会 reset cancelled=false**，导致 run() 在 await createUploadSession 恢复后静默命中 `if(cancelled) return`，前端卡死在 "Creating upload session… 0%"，Network Tab 里 PUT R2 请求永远不会发。
 
 ---
 
-## 2. 调用时序表（端到端 10 步，含 HTTP 方法、Body、状态变化、关键校验）
+## 2. 调用时序表（端到端 12 步，含 HTTP 方法、Body、状态变化、关键校验）
 
-| #   | 触发方                      | HTTP 端点                                 | 鉴权                                                 | Body / Payload                                                                                                                                                   | 关键校验 & 状态机变化                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 返回值 / UI 表现                                                                                                                                                                                                                                                  |
-| --- | --------------------------- | ----------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0   | **系统启动**                | -                                         | -                                                    | -                                                                                                                                                                | API 加载 Helmet/CORS，挂载 6 个 namespace routes；Worker 启动队列监听                                                                                                                                                                                                                                                                                                                                                                                                                                                             | [main.ts](file:///Users/jiexinli/MyProjects/shoot-the-ball/services/api/src/main.ts)                                                                                                                                                                              |
-| 1   | 👤 用户松手                 | N/A（浏览器本地）                         | N/A                                                  | 视频 File 对象                                                                                                                                                   | `document.createElement('video')` 读 `loadedmetadata`，拿到 **duration / width / height**                                                                                                                                                                                                                                                                                                                                                                                                                                         | 卡片初始化，进度条 0% Pending                                                                                                                                                                                                                                     |
-| 2   | 📱 前端                     | **`POST /v1/videos/upload-session`**      | JWT / dev bypass fixed user                          | ```json<br/>{<br/> "projectId": "proj-dev-default-001",<br/> "filename": "game1.mp4",<br/> "contentType": "video/mp4",<br/> "size": 123456789<br/>}              | ✅ 校验 extension 白名单<br/>✅ size ≤ 16GB (Zod 强校验)<br/>✅ projectId 必须属于当前 userId（防越权）<br/>✅ Prisma `video.create({status: UPLOADING})`                                                                                                                                                                                                                                                                                                                                                                         | `json<br/>{<br/>  "videoId": "cl_xxx",<br/>  "uploadUrl": "https://<r2-endpoint>/...?X-Amz-Signature=...",<br/>  "storageKey": "videos/<proj>/.../game1.mp4",<br/>  "uploadMethod": "PUT",<br/>  "uploadExpiresInSec": 900<br/>}<br/>` 卡片状态：**Uploading 0%** |
-| 3   | 📱 前端直连存储             | **`PUT <uploadUrl>`**                     | 预签名 URL SigV4                                     | 二进制 file 流（Content-Type 必须与申请时一致，否则 R2 403）                                                                                                     | `xhr.upload.onprogress (loaded/total)` 实时驱动真实进度条；用户点击 ✕ → `AbortController.abort()` 中断                                                                                                                                                                                                                                                                                                                                                                                                                            | 卡片进度条真实涨百分比 → 100% 时切下一阶段                                                                                                                                                                                                                        |
-| 4   | 📱 前端                     | **`POST /v1/videos/:id/complete`**        | JWT / dev bypass                                     | `json<br/>{<br/>  "duration": 7200.5,<br/>  "width": 1920,<br/>  "height": 1080<br/>}<br/>`（所有字段可选）                                                      | 🔴 **HARD SAFETY CHECK**：API 调 R2/MinIO `HeadObject` **真实检查文件是否存在于云端**；若 404 → 立即拒绝 409 "Object not found"（防止客户端伪造 complete 请求）<br/>✅ **`sizeBytes` 写入 DB 时用 HeadObject 返回的真实 `Content-Length`**，不用前端传的 size（防篡改）<br/>✅ status: `UPLOADING → UPLOADED`                                                                                                                                                                                                                     | 卡片切：**AI Processing 0%**                                                                                                                                                                                                                                      |
-| 5   | 📱 前端（自动 / 手动）      | **`POST /v1/videos/:id/process`**         | JWT / dev bypass                                     | 空 Body                                                                                                                                                          | ✅ 仅允许 `status == UPLOADED \|\| FAILED` 入队；PROCESSING / PROCESSING 的直接 409 Conflict（防重复 Worker 浪费资源）<br/>✅ Prisma `processingJob.create({status: PREPARING, progress: 0})`<br/>✅ BullMQ 入队 Redis List `video-processing`，jobId = ProcessingJob.id（幂等去重）<br/>✅ 3 次指数退避重试（失败自动重跑）                                                                                                                                                                                                      | `json<br/>{<br/>  "jobId": "cl_xxx_<processingJobId>"<br/>}<br/>`前端存 jobId，下一步 SSE 订阅                                                                                                                                                                    |
-| 6   | 🐍 Python AI Worker（常驻） | Redis BLPOP `video-processing` queue      | N/A（内部 Redis 协议）                               | `{videoId, projectId, userId, storageKey}`                                                                                                                       | Worker `process_video()` 主循环：<br/>1. `_update_api_job(PREPARING, 0.02)` → 调 PATCH<br/>2. `s3.get_object(shoot-the-ball-source, storageKey)` → 下载源视频到 /tmp<br/>3. 4 阶段 pipeline.run(ctx)<br/>4. POST `/highlights/bulk` 批量写结果<br/>5. PATCH status=`READY` progress=1.0                                                                                                                                                                                                                                           | N/A（异步，在 Worker 进程内执行，终端打印 INFO 日志）                                                                                                                                                                                                             |
-| 7   | 🐍 Worker（每阶段每 0.5%）  | **`PATCH /v1/jobs/:id`**                  | 🔐 **`X-Internal-Token` 自定义头**（不是 JWT！）     | `json<br/>{<br/>  "status": "DETECTING",<br/>  "progress": 0.15,<br/>  "stage": "Detecting ball (coarse pass 1/3)",<br/>  "pipelineVersion": "0.1.0"<br/>}<br/>` | ✅ `X-Internal-Token !== API_INTERNAL_TOKEN → 403 Forbidden`（Hard Constraint）<br/>✅ 状态机强校验，只允许 PREPARING → DETECTING → VERIFYING → GENERATING → READY，不允许跳步                                                                                                                                                                                                                                                                                                                                                    | 前端不可见；写入 DB ProcessingJob 表 progress/stage/status 字段                                                                                                                                                                                                   |
-| 8   | 📱 前端 SSE 订阅            | **`GET /v1/jobs/:jobId/events`**          | JWT / dev bypass + 只允许属主订阅他人 jobId 返回 403 | N/A（长连接）                                                                                                                                                    | API 侧：<br/>✅ Content-Type: `text/event-stream; charset=utf-8`<br/>✅ Cache-Control: `no-cache, no-transform`<br/>✅ X-Accel-Buffering: no（禁止 nginx 缓冲 SSE 包）<br/>✅ `setInterval(1.5s) → Prisma findProcessingJob` 轮询 DB<br/>✅ 节流：仅 progress 变化 ≥ 0.5% 才推事件<br/>✅ `setInterval(25s) → heartbeat` 包防 60s 反向代理断连<br/>✅ 10min 硬超时 → res.end() 防僵尸连接<br/>✅ `req.on('close')` 清两个 interval（防内存泄漏）<br/>✅ 读到 READY → `event: completed`；读到 FAILED → `event: failed` + 错误信息 | **SSE 事件流**：<br/>`<br/>event: progress<br/>data: {"jobId":"...", "stage":"Verifying", "progress":0.42}<br/><br/>event: heartbeat<br/>data: {"ts":1727131234567}<br/><br/>event: completed<br/>data: {"jobId":"...", "status":"READY"}<br/>`                   |
-| 9   | 🐍 Worker（pipeline 结束）  | **`POST /v1/videos/:id/highlights/bulk`** | 🔐 `X-Internal-Token`                                | 最多 5000 条 highlights（startTime/endTime/type/clipStorageKey）                                                                                                 | 💣 Prisma `$transaction` 原子：<br/>1. 软删该 videoId 所有旧 highlights（同视频重跑 pipeline 不会出现重复条目）<br/>2. `createMany({data, skipDuplicates: true})` 一次性批量 INSERT（比 for 循环快 100 倍，避免 N+1）<br/>3. ProcessingJob.status = `READY`                                                                                                                                                                                                                                                                       | DB：写入 clips，前端 SSE 下一个 1.5s 周期读到 READY                                                                                                                                                                                                               |
-| 10  | 📱 前端 SSE 回调            | N/A                                       | N/A                                                  | N/A                                                                                                                                                              | `event: progress` → 进度条涨 + stage 文案提示<br/>`event: completed` → 卡片 ✅ 绿色 Ready<br/>`event: failed` → 卡片 ❌ 红色 Failed + `error` 字段显示给用户                                                                                                                                                                                                                                                                                                                                                                      | 卡片最终状态                                                                                                                                                                                                                                                      |
+| #   | 触发方                       | HTTP 端点                                 | 鉴权                                                 | Body / Payload                                                                                                                                                   | 关键校验 & 状态机变化                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | 返回值 / UI 表现                                                                                                                                                                                                                                                                                                                                  |
+| --- | ---------------------------- | ----------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0   | **系统启动**                 | -                                         | -                                                    | -                                                                                                                                                                | API 加载 Helmet/CORS，挂载 6 个 namespace routes；Worker 启动队列监听；env 统一在**项目根 `.env`**，子包不再单独维护                                                                                                                                                                                                                                                                                                                                                                                                                                                      | [main.ts](file:///Users/jiexinli/MyProjects/shoot-the-ball/services/api/src/main.ts) + [env.ts](file:///Users/jiexinli/MyProjects/shoot-the-ball/services/api/src/config/env.ts)                                                                                                                                                                  |
+| 1   | 👤 用户松手                  | N/A（浏览器本地）                         | N/A                                                  | 视频 File 对象                                                                                                                                                   | `document.createElement('video')` 读 `loadedmetadata`，拿到 **duration / width / height**；MVP 强制单文件 `multiple=false`，多文件被自动 drop 掉只取第一个                                                                                                                                                                                                                                                                                                                                                                                                                | 卡片初始化，进度条 0% Pending；如果 DB 已经有视频，Hero + DropZone + 空态标题全部隐藏，只显示 Processed Videos 列表（删除最后一个视频后恢复空态）                                                                                                                                                                                                 |
+| 2   | 📱 前端                      | **`POST /v1/videos/upload-session`**      | JWT / dev bypass fixed user                          | ```json<br/>{<br/> "projectId": "proj-dev-default-001",<br/> "filename": "game1.mp4",<br/> "contentType": "video/mp4",<br/> "size": 123456789<br/>}              | ✅ 校验 extension 白名单<br/>✅ size ≤ 16GB (Zod 强校验)<br/>✅ projectId 必须属于当前 userId（防越权）<br/>✅ Prisma `video.create({status: UPLOADING})`<br/>✅ **DEV_MOCK_STORAGE=false**：返回真实 Cloudflare R2 SigV4 预签名 URL；**DEV_MOCK_STORAGE=true**：返回 `mock://` 占位字符串，前端不发 PUT，直接 setTimeout tick 0→100（调试/演示用，不用配 R2 CORS）                                                                                                                                                                                                       | `json<br/>{<br/>  "videoId": "cl_xxx",<br/>  "uploadUrl": "https://<r2-endpoint>/...?X-Amz-Signature=... 或 mock://...",<br/>  "storageKey": "videos/<proj>/.../game1.mp4",<br/>  "uploadMethod": "PUT",<br/>  "uploadExpiresInSec": 900<br/>}<br/>` 卡片状态：**Uploading 0%**；Modal 右上角显示 3 步进度指示器（Upload → Calibrate → Start AI） |
+| 3   | 📱 前端直连存储（或 mock）   | **`PUT <uploadUrl>`**                     | 预签名 URL SigV4（mock 分支无网络请求）              | 二进制 file 流（Content-Type 必须与申请时一致，否则 R2 403）                                                                                                     | `xhr.upload.onprogress (loaded/total)` 实时驱动真实进度条；用户点击 ✕ → `AbortController.abort()` 中断；**StrictMode 坑：cleanup abort 只中断 XHR，不打 cancelled flag，run() await 后只看 `uploadStartedForIdRef`**（否则卡在 0%）                                                                                                                                                                                                                                                                                                                                       | 进度条真实涨百分比 → 100%；mock 分支 10 步 setTimeout 0→10→…→100                                                                                                                                                                                                                                                                                  |
+| 4   | 📱 前端                      | **`POST /v1/videos/:id/complete`**        | JWT / dev bypass                                     | `json<br/>{<br/>  "duration": 7200.5,<br/>  "width": 1920,<br/>  "height": 1080<br/>}<br/>`（所有字段可选）                                                      | 🔴 **HARD SAFETY CHECK**：API 调 R2 `HeadObject` **真实检查文件是否存在于云端**；若 mock 分支则跳过（因为没真上传）<br/>✅ **`sizeBytes` 写入 DB 时用 HeadObject 返回的真实 `Content-Length`**，不用前端传的 size（防篡改）<br/>✅ status: `UPLOADING → UPLOADED`；**⚠️ complete 接口不会把 status 改 PROCESSING，也不会自动入队**（因为还要 Calibration）                                                                                                                                                                                                                | Modal 立即从 Step 1 切到 Step 2：Calibrate，显示视频 + 十字辅助线 + ROI 工具条，进度条保持 100%                                                                                                                                                                                                                                                   |
+| 4.5 | 👤 用户（Modal 内操作）      | N/A（纯前端状态机）                       | N/A                                                  | 点击视频上 2 个点 → 生成矩形 → 保存                                                                                                                              | MVP 使用「**点击式画矩形**」（不引入拖拽库，最快实现）：先点左上角，再点右下角，生成 bbox；自动对齐真实 video 渲染矩形（不是父容器，去黑边）<br/>✅ `hoopRoi` **必选**，不画不让点 Next；`courtRoi` 可选<br/>**Auto Calibrate 按钮**：disabled + Tooltip "Coming soon" 占位（后端 endpoint 以后补）                                                                                                                                                                                                                                                                       | 画完 1 个 ROI 立刻显示绿色实线矩形 + 百分比坐标；Next 按钮在 hoopRoi 画完后才可点击                                                                                                                                                                                                                                                               |
+| 5   | 📱 前端（点击 Next 自动）    | **`POST /v1/videos/:id/calibration`**     | JWT / dev bypass                                     | `json<br/>{<br/>  "hoopRoi": {x,y,w,h},<br/>  "courtRoi": {x,y,w,h} \| null<br/>}<br/>`（x/y/w/h 都是 0-1 归一化坐标，后端存 Video.calibration JSON 列）         | ✅ Zod schema 强校验：hoopRoi 必选且所有字段 0-1 范围；courtRoi 要么 null 要么 0-1<br/>✅ DB Video.calibration = 保存的 JSON                                                                                                                                                                                                                                                                                                                                                                                                                                              | 返回 200 成功后，前端**自动**立刻调下一步的 process（用户不用再点一个"Start AI"按钮）；Modal 自动切 Step 3: Start AI 状态，显示 AI Processing 文案 + SSE 进度                                                                                                                                                                                     |
+| 6   | 📱 前端（auto，接 5 成功）   | **`POST /v1/videos/:id/process`**         | JWT / dev bypass                                     | 空 Body                                                                                                                                                          | ✅ 仅允许 `status == UPLOADED \|\| FAILED` 入队；PROCESSING / PROCESSING 的直接 409 Conflict（防重复 Worker 浪费资源）<br/>✅ Prisma `processingJob.create({status: PREPARING, progress: 0})`<br/>✅ BullMQ 入队 Redis List `video-processing`，jobId = ProcessingJob.id（幂等去重）<br/>✅ 3 次指数退避重试（失败自动重跑）<br/>✅ **DEV_MOCK_PROCESSING=true**：不入真队，API 端直接写 status=READY 终态 + 调 `maybeGenerateAndSaveMockHighlights(video, count=3, useMock=true)` 生成 3 条兜底 highlight，SSE 一订阅立刻完成事件（MVP 不用起 ai-worker 也能看完整链路） | `json<br/>{<br/>  "jobId": "cl_xxx_<processingJobId>"<br/>}<br/>`前端存 jobId，下一步 SSE 订阅                                                                                                                                                                                                                                                    |
+| 7   | 🐍 Python AI Worker（常驻）  | Redis BLPOP `video-processing` queue      | N/A（内部 Redis 协议）                               | `{videoId, projectId, userId, storageKey}`                                                                                                                       | Worker `process_video()` 主循环：<br/>1. `_update_api_job(PREPARING, 0.02)` → 调 PATCH<br/>2. `s3.get_object(shoot-the-ball-source, storageKey)` → 下载源视频到 /tmp<br/>3. 4 阶段 pipeline.run(ctx)，**PipelineContext 里带用户保存的 hoopRoi/courtRoi**<br/>4. POST `/highlights/bulk` 批量写结果<br/>5. PATCH status=`READY` progress=1.0                                                                                                                                                                                                                              | N/A（异步，在 Worker 进程内执行，终端打印 INFO 日志）；DEV_MOCK_PROCESSING=true 时整个 Worker 进程不需要启动                                                                                                                                                                                                                                      |
+| 8   | 🐍 Worker（每阶段每 0.5%）   | **`PATCH /v1/jobs/:id`**                  | 🔐 **`X-Internal-Token` 自定义头**（不是 JWT！）     | `json<br/>{<br/>  "status": "DETECTING",<br/>  "progress": 0.15,<br/>  "stage": "Detecting ball (coarse pass 1/3)",<br/>  "pipelineVersion": "0.1.0"<br/>}<br/>` | ✅ `X-Internal-Token !== API_INTERNAL_TOKEN → 403 Forbidden`（Hard Constraint）<br/>✅ 状态机强校验，只允许 PREPARING → DETECTING → VERIFYING → GENERATING → READY，不允许跳步                                                                                                                                                                                                                                                                                                                                                                                            | 前端不可见；写入 DB ProcessingJob 表 progress/stage/status 字段                                                                                                                                                                                                                                                                                   |
+| 9   | 📱 前端 SSE 订阅             | **`GET /v1/jobs/:jobId/events`**          | JWT / dev bypass + 只允许属主订阅他人 jobId 返回 403 | N/A（长连接）                                                                                                                                                    | API 侧：<br/>✅ Content-Type: `text/event-stream; charset=utf-8`<br/>✅ Cache-Control: `no-cache, no-transform`<br/>✅ X-Accel-Buffering: no（禁止 nginx 缓冲 SSE 包）<br/>✅ `setInterval(1.5s) → Prisma findProcessingJob` 轮询 DB<br/>✅ 节流：仅 progress 变化 ≥ 0.5% 才推事件<br/>✅ `setInterval(25s) → heartbeat` 包防 60s 反向代理断连<br/>✅ 10min 硬超时 → res.end() 防僵尸连接<br/>✅ `req.on('close')` 清两个 interval（防内存泄漏）<br/>✅ 读到 READY → `event: completed`；读到 FAILED → `event: failed` + 错误信息                                         | **SSE 事件流**：<br/>`<br/>event: progress<br/>data: {"jobId":"...", "stage":"Verifying", "progress":0.42}<br/><br/>event: heartbeat<br/>data: {"ts":1727131234567}<br/><br/>event: completed<br/>data: {"jobId":"...", "status":"READY"}<br/>`                                                                                                   |
+| 10  | 🐍 Worker（pipeline 结束）   | **`POST /v1/videos/:id/highlights/bulk`** | 🔐 `X-Internal-Token`                                | 最多 5000 条 highlights（startTime/endTime/type/clipStorageKey）                                                                                                 | 💣 Prisma `$transaction` 原子：<br/>1. 软删该 videoId 所有旧 highlights（同视频重跑 pipeline 不会出现重复条目）<br/>2. `createMany({data, skipDuplicates: true})` 一次性批量 INSERT<br/>3. ProcessingJob.status = `READY`<br/>MVP 兜底：`maybeGenerateAndSaveMockHighlights(video, count, useMock)` 是 highlights.service.ts 私有方法，**boolean flag `useMock` 控制是否启用，不走 env**（用户约束："单独抽离出去成一个方法在当前文件，就用一个 boolean 的 flag 来进行判断是否使用，不要用 env"）                                                                         | DB：写入 clips；DEV_MOCK_PROCESSING 路径下 useMock=true，生成 startTimeSec/endTimeSec/timeSec 等 Sec 字段兼容旧 UI（真实 highlights 用 startTime/endTime 秒浮点）                                                                                                                                                                                 |
+| 11  | 📱 前端 SSE 回调             | N/A                                       | N/A                                                  | N/A                                                                                                                                                              | `event: progress` → 进度条涨 + stage 文案提示<br/>`event: completed` → Modal 自动关闭，父组件 VideoUploader 刷新卡片列表<br/>`event: failed` → Modal 显示 error + Retry 按钮                                                                                                                                                                                                                                                                                                                                                                                              | Processed Videos 列表里对应卡片：绿色 ✅ Ready badge + highlights 数量                                                                                                                                                                                                                                                                            |
+| 12  | 📱 前端（卡片 highlight 区） | N/A（纯前端播放器）                       | N/A                                                  | GET video downloadUrl 预签名 URL                                                                                                                                 | MVP 用 **HTML5 Media Fragment** `src={downloadUrl}#t=start,end` 实现按 clip 时间独立播放：**不在前端真切 mp4，不接 ffmpeg.wasm，保持 0 依赖**<br/>✅ 每一条 highlight 一个独立 `<video controls>` 小卡片，不会互相干扰<br/>✅ 展示 2PT / 3PT · HOME / AWAY · confidence 百分比 · MOCK 虚线边框（dev mock 一眼识别）                                                                                                                                                                                                                                                       | 卡片下方 `grid sm:grid-cols-2` 展示 2 列 highlight clip 播放器；Processed Videos 顶部有 Select / Select All / Export 3 个 disabled + Tooltip "Coming soon" 占位按钮（为以后批量合 clip 导出做 UI 预留）                                                                                                                                           |
 
 ---
 
@@ -113,185 +126,115 @@ stateDiagram-v2
 
 ---
 
-## 6. 本地全离线可跑方案（无云服务 / 飞机 / 断网场景）
+## 6. 本地 MVP 方案（无需 ai-worker 进程、MinIO 可选 —— 用户方向性约束已固化）
 
-本项目所有依赖的云服务都有 **1:1 的本地 Docker 替代品**，无需 Cloudflare/Supabase/Upstash 账号即可跑通 1-9 步全流程 + 真 YOLOv8 MPS 推理：
+> ⚠️ **用户最终决策（永久约束）**：
+> 「你不要这样写 mock，把它全部去掉。我现在只需要一个开关来进行控制，可以放在 env 里面，然后给我写好 comment 就可以。然后我有了 ai worker 之后就打开那个开关（来切换 / 关闭 mock，走真调度）。我的目的是不要搞得太复杂，现在先简化操作，把我 api + web 都弄通，之后再加上 ai worker。」
+> 「Cloudflare R2：Dev/Prod 统一用云端 R2，不用本地 Docker 起 MinIO；Bucket CORS 自己去 Cloudflare Dashboard 配。」
+
+**结论：历史文档里写的本地 MinIO / switch-env-mode 切换脚本等方案全部作废，不要用。** MVP 阶段永远走：真 R2（或 mock storage）+ 真 DB/Redis Docker + `DEV_MOCK_PROCESSING` 兜底写终态。
+
+### 6.1 统一 env 结构（永远只有项目根目录一份）
+
+所有子包（services/api / services/ai-worker / packages/*）**都不要单独维护 `.env.local`**。所有变量统一放在 **项目根目录 `.env`**，子包 package.json 的 scripts 里通过 `--env-file ../../.env` 或 `--env-file ../.env` 向上读一份，避免之前 8 个 env 文件泛滥的问题。
+
+打开根 `.env`（非 Git 跟踪，已经有模板）检查下面这几个关键开关：
+
+| env 变量              | 默认值  | 作用（注释已写在 env 文件里）                                                                                                                                                            |
+| --------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DEV_MOCK_STORAGE`    | `false` | `false`：真 PUT 到 Cloudflare R2（需要你在 Cloudflare Dashboard 给 `shoot-the-ball-source` 桶配 CORS：origin `http://localhost:5678`，methods `GET,PUT,HEAD`，Allow `*`，Expose `ETag`） |
+|                       |         | `true`：前端返回 `mock://` 占位，完全不发 PUT 请求，本地 setTimeout tick 模拟 0→100。用于演示/调 UI，不用配 R2 CORS，断网也能跑                                                          |
+| `DEV_MOCK_PROCESSING` | `true`  | `true`：process 接口里如果 ai-worker 没启动 / 没配置，API 自己直接把 Video / ProcessingJob 写 READY 终态，并调用兜底方法生成 2-3 条 mock highlights（MVP 不用起 Python 进程）            |
+|                       |         | `false`：真 BullMQ 入队 Redis，ai-worker 进程必须消费，否则卡片永远卡在 PROCESSING 不绿                                                                                                  |
+
+> 🧠 兜底 highlights 实现约束（用户决策永久有效）：`maybeGenerateAndSaveMockHighlights(video, count, useMock)` 是 [highlights.service.ts](file:///Users/jiexinli/MyProjects/shoot-the-ball/services/api/src/modules/videos/services/highlights.service.ts) 的**私有方法**，通过 `useMock` 这个 **boolean flag** 控制开关，**绝对不要改成通过 env 控制**（用户原话：「请你单独抽离出去成一个方法在当前文件，就用一个 boolean 的 flag 来进行判断是否使用，不要用 env」）。
+
+### 6.2 MVP 本地 4 步全链路跑通（不用 Python ai-worker，不用 MinIO）
 
 ```mermaid
 flowchart LR
-    subgraph LOCAL [🧱 All running on your MacBook via docker compose + poetry + pnpm dev]
+    subgraph LOCALMVP [🧱 本地 Docker 只起 2 个基础设施，其他全靠 env 开关]
         direction LR
-        W[apps/web:3000] -->|HTTP| A[services/api:4321]
-        A -->|prisma| PG[(Postgres 16 alpine<br/>docker 5432<br/>↔ 替代 Supabase)]
-        A -->|bullmq| RD[(Redis 7 alpine<br/>docker 6379<br/>↔ 替代 Upstash)]
-        W -->|PUT XMLHttpRequest| M[MinIO latest<br/>docker 9000<br/>↔ 替代 Cloudflare R2<br/>两个桶 auto-created]
-        A -->|S3 SDK getSignedUrl + forcePathStyle=true| M
-        AI[services/ai-worker<br/>poetry run python -m app<br/>🐍 local process MPS YOLOv8] -->|rq.BLPOP| RD
-        AI -->|PATCH jobs + POST highlights + X-Internal-Token| A
-        AI -->|download source + upload exports| M
+        W[apps/web:5678] -->|HTTP| A[services/api:4321]
+        A -->|prisma| PG[(Postgres 16 alpine<br/>docker 5432)]
+        A -->|bullmq + SSE 轮询| RD[(Redis 7 alpine<br/>docker 6379)]
+        W -->|PUT XMLHttpRequest<br/>真实 Cloudflare R2| R2[(☁️ Cloudflare R2<br/>shoot-the-ball-source<br/>桶配 CORS)]
+        A -->|DEV_MOCK_PROCESSING=true<br/>直接写 READY 终态<br/>不用 Python| A
     end
 ```
 
-### 6.1 本地 5 步跑通真流程（不用云服务，MPS GPU 加速 ✅）
-
-#### Step 1：起本地 4 个基础设施容器（Postgres / Redis / MinIO + create-buckets）
+#### Step 1：起基础设施（只有 2 个容器，Postgres + Redis）
 
 ```bash
 cd /Users/jiexinli/MyProjects/shoot-the-ball
-docker compose up -d
+# ⚠️ docker compose up 不需要起 minio / create-buckets 了（用户决策：走云 R2）
+docker compose -f infra/compose/dev-infra.yml up -d postgres redis
 ```
 
-✅ 完成标志：
+✅ 完成标志：`docker compose -f infra/compose/dev-infra.yml ps` 两个容器 `State=Running`
 
-- 浏览器打开 [http://localhost:9001](http://localhost:9001)（MinIO 管理后台），用 `rootuser / rootpass123` 登录 → 左侧 Buckets → 看到 **shoot-the-ball-source** 和 **shoot-the-ball-exports** 两个桶已经自动建好（通过 infra/compose/dev-infra.yml L74 的 `create-buckets` service 跑 mc mb 命令建好的，不用手动点）
-- `docker compose ps` → 4 个容器 `State = Running`（postgres / redis / minio / create-buckets exited 0）
+#### Step 2：确认根 `.env` 的 DB/Redis 变量（4 组变量）
 
-#### Step 2：切换 **API + AI Worker** 的 env 指向本地 Docker（关键：env 双份切换）
+```
+DATABASE_URL=postgresql://shoot:shootdevpass123@127.0.0.1:5432/shoot_the_ball_dev?pgbouncer=true&schema=public
+DIRECT_DATABASE_URL=postgresql://shoot:shootdevpass123@127.0.0.1:5432/shoot_the_ball_dev?schema=public
+REDIS_URL=redis://default:shootredisdevpass123@127.0.0.1:6379/0
+DEV_BYPASS_AUTH=true
+DEV_MOCK_STORAGE=false   # 要真传 R2 → false；要断网演示 → true
+DEV_MOCK_PROCESSING=true # 没启动 Python → true；ai-worker 跑起来后切 false
+```
 
-> 🛡️ 千万不要动你已经填好云服务的 `.env` 和 `.env.local`！我们新建 `.env.local` 的 **本地模式专用文件** 或者复制一份替换 4 组变量即可：
+#### Step 3：Prisma + seed
 
 ```bash
-# 备份你现在的云服务 env（以后切回去只要 cp 回来）
-cp services/api/.env.local services/api/.env.cloud-backup
-cp services/ai-worker/.env.local services/ai-worker/.env.cloud-backup
+cd services/api
+pnpm db:generate
+pnpm db:push
+pnpm db:seed
 ```
 
-然后把下面 4 组变量 **覆盖写入** 到两个 `.env.local` 文件里（保持所有其他变量不变，特别是 `API_INTERNAL_TOKEN` 要两边字节级一致）：
+✅ 完成标志：终端打印 4+ 条 `Created ...`；Prisma Studio 能看到 User / Project / Video 空表
 
-| env 变量名                  | 本地模式值                                                                                          | 注释                                                                                                                                                                       |
-| --------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`              | `postgresql://shoot:shootdevpass123@127.0.0.1:5432/shoot_the_ball_dev?pgbouncer=true&schema=public` | 对应 [dev-infra.yml L28-L31](file:///Users/jiexinli/MyProjects/shoot-the-ball/infra/compose/dev-infra.yml#L28-L31) 的 POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB          |
-| `DIRECT_DATABASE_URL`       | `postgresql://shoot:shootdevpass123@127.0.0.1:5432/shoot_the_ball_dev?schema=public`                | Prisma migrate 用，不带 pgbouncer，端口 5432                                                                                                                               |
-| `REDIS_URL`                 | `redis://default:shootredisdevpass123@127.0.0.1:6379/0`                                             | 对应 [dev-infra.yml L45](file:///Users/jiexinli/MyProjects/shoot-the-ball/infra/compose/dev-infra.yml#L45) `--requirepass`；注意是 `redis://` 非 TLS，本地不需要 rediss:// |
-| `STORAGE_PROVIDER`          | `s3` 或 `r2` 都行（MinIO 也是 S3-compatible，forcePathStyle=true 生效）                             | 都可以                                                                                                                                                                     |
-| `STORAGE_ENDPOINT`          | **`http://127.0.0.1:9000`**                                                                         | ⚠️ 非常重要：指向本地 MinIO 9000 端口，不要带 https://（本地 http 即可）                                                                                                   |
-| `STORAGE_REGION`            | `us-east-1`                                                                                         | 随便填，MinIO 对 region 名不敏感，只要非空就行；不要再填 auto（auto 是 R2 专属约定）                                                                                       |
-| `STORAGE_ACCESS_KEY_ID`     | `rootuser`                                                                                          | 对应 [dev-infra.yml L59](file:///Users/jiexinli/MyProjects/shoot-the-ball/infra/compose/dev-infra.yml#L59) MINIO_ROOT_USER                                                 |
-| `STORAGE_SECRET_ACCESS_KEY` | `rootpass123`                                                                                       | 对应 [dev-infra.yml L60](file:///Users/jiexinli/MyProjects/shoot-the-ball/infra/compose/dev-infra.yml#L60) MINIO_ROOT_PASSWORD                                             |
+#### Step 4：3 个终端并发起（MVP 不需要 ai-worker 终端！）
 
 ```bash
-# 确认 4 组变量改完后：切回云服务只要 cp .env.cloud-backup .env.local 即可，完全可逆
+# 🪟 终端 1：API
+cd services/api && pnpm dev
+# 预期："API listening on http://127.0.0.1:4321" + Prisma connected
+
+# 🪟 终端 2：Next.js 前端（端口=5678，因为你已经在 Cloudflare CORS origin 里配的是 5678）
+cd apps/web && pnpm dev
+# 浏览器打开 http://localhost:5678
+
+# 🪟 终端 3（可选）：DB 可视化
+cd services/api && pnpm db:studio
+# http://localhost:5555 肉眼看每一步状态变化
 ```
 
-#### Step 3：Prisma 推 schema 到本地 Postgres，跑 seed
+✅ 验收流程（不启动 Python ai-worker、DEV_MOCK_PROCESSING=true，全程 60s）：
 
-```bash
-cd /Users/jiexinli/MyProjects/shoot-the-ball/services/api
-
-# Prisma CLI 只认 .env 不认 .env.local，所以每次操作前先 cp 一次（别 git commit .env！）
-cp .env.local .env
-pnpm db:generate      # 生成 Prisma Client（第一次才需要）
-pnpm db:push          # 把 schema.prisma 的所有表推到本地 Postgres shoot_the_ball_dev
-pnpm db:seed          # 插入默认 userId=user_dev_000000000000001 + projectId=proj-dev-default-001
-rm .env               # 用完删掉，防止 git 误提交（pnpm dev 会优先读 .env.local）
-```
-
-✅ 完成标志：`db:seed` 终端打印 4 条 "Created ..."，没有 `P1001 Can't reach database server` 报错 → DB 全通。
-
-#### Step 4：**第一次本地真模型**（下载 YOLOv8 权重 + MPS GPU 预热验证）
-
-```bash
-cd /Users/jiexinli/MyProjects/shoot-the-ball/services/ai-worker
-
-# 4-a) 安装 Python 依赖
-poetry install --no-interaction
-
-# 4-b) 先手动跑一段最小 YOLOv8-mps 预热脚本（只要这个过了，真 pipeline 一定能跑）
-poetry run python3 << 'PYEOF'
-from ultralytics import YOLO
-import torch
-
-if torch.backends.mps.is_available():
-    device = "mps"
-    print("✅ MPS GPU (Apple Silicon) detected, using device=mps")
-else:
-    device = "cpu"
-    print("⚠️  MPS not available, fallback to CPU (will be ~10x slower)")
-
-# 第一次运行会自动下载 6MB 的 yolov8n.pt 到 ~/.cache/ultralytics
-# （不用担心：这个模型是 nano 级最小模型，6MB，下载 1 秒，推理速度在 M2 上 ~400 fps）
-model = YOLO('yolov8n.pt')
-
-# 推一个纯黑图片做 warmup，确保 MPS kernel 编译完（第一次可能 10-15 秒，之后就快了）
-import numpy as np
-dummy = np.zeros((1, 3, 640, 640), dtype=np.uint8)
-_ = model(dummy, device=device, verbose=False)
-print(f"✅ YOLOv8n warmed up on device={device}!")
-PYEOF
-```
-
-✅ 完成标志：最后打印 `✅ YOLOv8n warmed up on device=mps!`。如果 MPS kernel 编译日志比较多不用怕，正常现象，M1/M2 系列第一次跑 PyTorch MPS 都会后台编译 Metal shader。
-⚠️ 如果卡在下载上卡住 30 秒没动静：手动 `curl -L -o ~/.cache/ultralytics/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.1.0/yolov8n.pt`
-
-**注意（提前说的坑）**：我读代码发现现在 [player_detector.py L38-L63](file:///Users/jiexinli/MyProjects/shoot-the-ball/services/ai-worker/app/detectors/player_detector.py#L38-L63) 的 3 个 Detector 子类 `detect()` 方法还全是空的 `return []`（MVP 阶段把真 YOLO 调用留作 TODO 占位）。所以如果你直接跑 pipeline，不会触发检测。先用 `AI_DEMO_MODE=true` 跑通队列链路，再接真模型。接真模型的代码我可以下一步帮你改（把 3 个 detect 换成 YOLO() 调用 + MPS 自动选 device + 分批 batched inference，大概 60 行代码左右）。
-
-#### Step 5：4 个终端并发起，拖视频跑全流程
-
-按顺序在 4 个**独立终端窗口**依次启动（不要关窗口，关了进程就没了）：
-
-```bash
-# 🪟 终端 1：Node API
-cd services/api && cp .env.local .env && pnpm dev          # 看到 "API listening on http://127.0.0.1:4321" 就 OK
-
-# 🪟 终端 2：Python AI Worker（AI_DEMO_MODE=true 先跑调度链路，不要开真模型）
-cd services/ai-worker && poetry run python -m app
-# 📝 启动日志要出现 "Starting AI Worker, listening to ['video-processing', 'video-export']"
-
-# 🪟 终端 3：Next.js 前端
-cd apps/web && NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:4321/v1 pnpm dev
-# 浏览器自动打开 http://localhost:3000
-
-# 🪟 终端 4（可选）：Prisma Studio 可视化看 DB 每一步数据变化，超好用
-cd services/api && cp .env.local .env && pnpm db:studio
-# 浏览器打开 http://localhost:5555 → 左侧点 ProcessingJob → 每次前端拖视频，能看到 status 从 PREPARING 到 READY 的变化
-```
-
-### 6.2 本地 vs 云服务模式切换：一键 cp 切换脚本（可选自己存在 /scripts）
-
-```bash
-#!/bin/zsh
-# ./scripts/switch-env-mode.sh local | cloud
-MODE=$1
-cd /Users/jiexinli/MyProjects/shoot-the-ball
-case $MODE in
-  local)
-    cp services/api/.env.local services/api/.env.cloud-backup 2>/dev/null
-    cp services/ai-worker/.env.local services/ai-worker/.env.cloud-backup 2>/dev/null
-    cp .env .env.cloud-backup 2>/dev/null
-    echo "✅ Switched to LOCAL mode (MinIO + docker Postgres/Redis). Re-run pnpm dev."
-    ;;
-  cloud)
-    cp services/api/.env.cloud-backup services/api/.env.local 2>/dev/null
-    cp services/ai-worker/.env.cloud-backup services/ai-worker/.env.local 2>/dev/null
-    cp .env.cloud-backup .env 2>/dev/null
-    echo "☁️  Switched to CLOUD mode (Cloudflare R2 + Supabase + Upstash). Re-run pnpm dev."
-    ;;
-  *) echo "Usage: $0 local | cloud"; exit 1 ;;
-esac
-```
+1. 拖 testing-video.MP4 → 3 步 Modal 打开
+2. Step 1 Upload：进度条 0 → 100（DEV_MOCK_STORAGE=true 10s 左右；DEV_MOCK_STORAGE=false 真实 R2 PUT 进度）
+3. Step 2 Calibrate：点 2 下画 hoopRoi（必选）→ 点 Save + Start AI
+4. Modal 关 → Processed Videos 列表卡片绿 ✅ Ready → 展开能看到 3 个独立 `<video controls>` 播放器（每个是 Media Fragment 播对应区间）
 
 ---
 
-## 7. 端到端自检命令集（每次 push 代码前都可以跑一遍）
+## 7. 端到端自检命令集（每次 commit 前跑一遍）
 
 ```bash
 # 1. 共享包编译（前后端类型契约必须一致）
-cd /path/to/shoot-the-ball
+cd /Users/jiexinli/MyProjects/shoot-the-ball
 pnpm --filter @shoot-the-ball/contracts build
 
-# 2. API 编译 + Lint + Unit Test（CI 同款）
-cd services/api && cp .env.local .env && pnpm lint && pnpm build && pnpm test && rm .env
+# 2. API 编译 + Lint
+cd services/api && pnpm lint && pnpm build
 
-# 3. AI Worker Lint + Unit Test（CI 同款）
-cd services/ai-worker && poetry run ruff check app tests && poetry run pytest -q
-
-# 4. Web TS 类型检查
-cd apps/web && npx tsc --noEmit
-
-# 5. 真实 SSE 心跳测试（确保 25s 心跳真的推了）
-cd /Users/jiexinli/MyProjects/shoot-the-ball
-timeout 30 curl -N http://127.0.0.1:4321/v1/jobs/<any-existing-jobId>/events | grep -E 'heartbeat|progress' | head -5
+# 3. Web TS 类型检查（IDE diagnostics 也能看）
+cd apps/web && pnpm exec tsc --noEmit
 ```
+
+> CI/CD 说明：`.github/workflows/ci.yml` / `docker.yml` 目前已把 `on: push / pull_request / tag` 注释掉，只剩 `workflow_dispatch` 手动触发（避免每次 push 都失败浪费 GitHub 配额）。等所有核心接口写完再把注释去掉。
 
 ---
 

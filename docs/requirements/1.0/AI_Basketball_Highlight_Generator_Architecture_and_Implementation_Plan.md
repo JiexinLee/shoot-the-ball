@@ -23,7 +23,7 @@
 
 - **数据库**: PostgreSQL（推荐 **Supabase**，本地用 `docker compose` 起 Postgres 16）
 - **队列 / 内存缓存**: Redis（推荐 **Upstash**，本地 `docker compose` 起 Redis 7）
-- **对象存储**: S3 兼容；MVP 首推 **Cloudflare R2**（零出口费，原生支持 Direct Upload 预签名 URL）；也可以 AWS S3 / MinIO
+- **对象存储**: S3 兼容；**MVP 统一使用 Cloudflare R2**（零出口费，原生支持 Direct Upload 预签名 URL，Dev/Prod 不切换；不要本地起 MinIO/S3 替代）；生产后期如需兼容 AWS S3 再扩展
 - **CDN 前端资源**: Cloudflare
 - **部署目标**
   - Web Dashboard: Vercel
@@ -415,7 +415,7 @@ data: {"jobId":"job_xxx","reason":"MAX_DURATION_REACHED"}
 
 - `PATCH /v1/jobs/:id` schema 字段：`status`（enum）/ `progress`（0-1）/ `stage` / `error_message` / `pipeline` / `model`
 - `POST /v1/videos/:id/highlights/bulk` 每条 item：`startTimeSec, endTimeSec, eventTimeSec, confidence, type, metadata(Json nullable), clipStorageKey`
-- 两端必须一致 Header：`X-Internal-Token: ${API_INTERNAL_TOKEN}`，两端 `.env.local` 的 token 必须字节级一致（services/api ↔ services/ai-worker）
+- 两端必须一致 Header：`X-Internal-Token: ${API_INTERNAL_TOKEN}`，**env 统一放项目根目录 `.env`**，子包通过 `--env-file` 向上读；不要单独在 `services/api/.env.local` 或 `services/ai-worker/.env.local` 维护分散副本（避免两边不一致）
 
 ---
 
@@ -541,29 +541,28 @@ FAILED ──Retry / Resume──► 重跑最近阶段（结果持久化可恢�
 
 ```bash
 cd shoot-the-ball
-cp .env.example .env.local        # 共享变量（可选）
-cp services/api/.env.example services/api/.env.local
-cp services/ai-worker/.env.example services/ai-worker/.env.local
-# 填 services/api/.env.local 至少：DATABASE_URL / REDIS_URL / R2/S3 / API_INTERNAL_TOKEN / DEV_BYPASS_AUTH=true
-docker compose up -d postgres redis minio    # MinIO 本地替代 R2（可选）
+cp .env.example .env               # ★ 所有变量统一放项目根目录 .env，不要在 services/* 子目录建独立 .env.local
+# 填 .env 至少：DATABASE_URL / REDIS_URL / R2 凭证(STORAGE_ENDPOINT / ACCESS_KEY_ID / SECRET_ACCESS_KEY) / API_INTERNAL_TOKEN / DEV_BYPASS_AUTH=true
+# + MVP 两个开关：DEV_MOCK_STORAGE=false（走真 R2） / DEV_MOCK_PROCESSING=true（不入真队，直接写 READY + mock highlights）
+docker compose -f infra/compose/dev-infra.yml up -d postgres redis   # 只起 2 个容器（不用 MinIO，不用 Python ai-worker）
 ```
 
-### 15.2 四个命令起全端
+### 15.2 三个命令起 MVP（不用 Python ai-worker，不用 MinIO）
 
 ```bash
 # Terminal 1 — API (4321)
-pnpm --filter @shoot-the-ball/api db:generate && db:migrate && db:seed
-pnpm dev:api        # 或 cd services/api && pnpm tsx watch src/main.ts
+pnpm --filter @shoot-the-ball/api db:generate && pnpm --filter @shoot-the-ball/api db:push && pnpm --filter @shoot-the-ball/api db:seed
+pnpm dev:api        # 或 cd services/api && pnpm tsx watch src/main.ts （--env-file ../../.env 已在 scripts 内配置）
 
-# Terminal 2 — Python AI worker (消费 Redis 队列)
-pnpm dev:worker     # 或 cd services/ai-worker && poetry run python -m app.worker
+# ★ MVP 阶段不需要起 Python worker：.env 里 DEV_MOCK_PROCESSING=true（默认）时，POST /process 会直接写 READY + 2-3 条 mock highlights
+# 接真 YOLO 时再开 Terminal 2：
+#   Terminal 2 — Python AI worker (消费 Redis 队列，Phase 1 后启用)
+#   pnpm dev:worker     # 或 cd services/ai-worker && poetry run python -m app.worker
+#   Terminal 2b — AI 调试（直接本地视频跑 pipeline，不经 Redis 不经 API）
+#   cd services/ai-worker
+#   poetry run python -m app.worker --local-video ../assets/testing-video.MP4 --output-dir ./tmp_out --skip-upload
 
-# Terminal 2b — AI 调试（直接本地视频跑 pipeline，不经 Redis 不经 API）
-cd services/ai-worker
-poetry run python -m app.worker --local-video ../assets/testing-video.MP4 \
-  --output-dir ./tmp_out --skip-upload
-
-# Terminal 3 — Web Dashboard (3000)
+# Terminal 3 — Web Dashboard (5678)
 pnpm dev:web
 ```
 
