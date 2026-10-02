@@ -128,7 +128,14 @@ export interface Highlight {
   confidence: number;
   type: HighlightType;
   thumbnailStorageKey?: string;
-  clipStorageKey?: string;
+  thumbnailUrl?: string | null;
+  clipStorageKey?: string | null;
+  /**
+   * GET /highlights 返回时后端用 exports bucket presigned 动态生成的短 clip URL；
+   * 这个 URL 对应的 MP4 本身就只有 [startTime,endTime] 几秒钟，直接塞给 <video src>
+   * 就能让进度条显示真实 0:04/0:04，不会显示全视频 17s。
+   */
+  clipUrl?: string | null;
   metadata?: Record<string, unknown>;
   userStatus: HighlightUserStatus;
   deleted: boolean;

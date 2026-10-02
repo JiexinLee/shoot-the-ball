@@ -5,6 +5,7 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
+import type { Readable } from "node:stream";
 import { env } from "../config/env";
 import { logger } from "../config/logger";
 
@@ -169,4 +170,30 @@ export async function headObject(
     logger.error({ err, bucket, key }, "headObject failed");
     throw err;
   }
+}
+
+/**
+ * 服务端直接把 Buffer / Readable Stream 写进 R2（不走前端 presigned PUT）。
+ * 用于 API 本地 trim 完 clip 后直接存到 exports bucket。
+ */
+export async function putObject(
+  bucket: "source" | "exports",
+  key: string,
+  body: Buffer | Uint8Array | Readable | ReadableStream | string,
+  opts?: { contentType?: string; contentLength?: number },
+): Promise<{ key: string; etag?: string }> {
+  const client = getStorageClient();
+  const bucketName =
+    bucket === "source"
+      ? env.STORAGE_BUCKET_SOURCE
+      : env.STORAGE_BUCKET_EXPORTS;
+  const cmd = new PutObjectCommand({
+    Bucket: bucketName,
+    Key: key,
+    Body: body,
+    ContentType: opts?.contentType ?? "application/octet-stream",
+    ContentLength: opts?.contentLength,
+  });
+  const res = await client.send(cmd);
+  return { key, etag: res.ETag };
 }

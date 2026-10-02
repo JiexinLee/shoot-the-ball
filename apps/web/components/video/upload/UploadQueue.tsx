@@ -1,70 +1,175 @@
 "use client";
 
-import { Trash2, SquareCheck, CheckSquare, ScissorsLineDashed } from "lucide-react";
+import {
+  Trash2,
+  SquareCheck,
+  CheckSquare,
+  ScissorsLineDashed,
+  Square,
+  Loader2,
+  Play,
+  FileVideo,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { VideoCard } from "./VideoCard";
-import type { UploadedVideo } from "@/lib/types";
+import { Badge } from "@/components/ui/badge";
+import { HighlightClipPlayer } from "./VideoCard";
+import type { UploadedVideo, Highlight } from "@/lib/types";
+import { cn, formatBytes } from "@/lib/utils";
 
 interface UploadQueueProps {
   videos: UploadedVideo[];
-  onPreview: (video: UploadedVideo) => void;
-  onRemove: (video: UploadedVideo) => void;
+  onPreviewClip: (video: UploadedVideo, clip: Highlight) => void;
+  onRemoveClip: (video: UploadedVideo, clip: Highlight) => void;
   onClearAll: () => void;
   className?: string;
+  selectionEnabled?: boolean;
+  selectedHighlightIds?: Set<string>;
+  deletedHighlightIds?: Set<string>;
+  totalHighlightCount?: number;
+  exporting?: boolean;
+  onToggleSelectionMode?: () => void;
+  onToggleSelectAll?: () => void;
+  onToggleHighlight?: (highlightId: string) => void;
+  onExport?: () => void;
+}
+
+function formatClock(s: number): string {
+  if (!Number.isFinite(s) || s < 0) s = 0;
+  const sec = Math.floor(s);
+  const m = Math.floor(sec / 60);
+  const ss = String(sec % 60).padStart(2, "0");
+  const h = Math.floor(m / 60);
+  if (h > 0) {
+    const mm = String(m % 60).padStart(2, "0");
+    return `${h}:${mm}:${ss}`;
+  }
+  return `${m}:${ss}`;
 }
 
 export function UploadQueue({
   videos,
-  onPreview,
-  onRemove,
+  onPreviewClip,
+  onRemoveClip,
   onClearAll,
   className,
+  selectionEnabled = false,
+  selectedHighlightIds,
+  deletedHighlightIds,
+  totalHighlightCount = 0,
+  exporting = false,
+  onToggleSelectionMode,
+  onToggleSelectAll,
+  onToggleHighlight,
+  onExport,
 }: UploadQueueProps) {
   if (videos.length === 0) return null;
 
+  const primary = videos[0];
+  const clips: { clip: Highlight; video: UploadedVideo }[] = [];
+  for (const v of videos) {
+    if (v.highlights) {
+      for (const c of v.highlights) {
+        if (deletedHighlightIds?.has(c.id)) continue;
+        clips.push({ clip: c, video: v });
+      }
+    }
+  }
+
+  const selectedCount = selectedHighlightIds?.size ?? 0;
+  const allSelected =
+    totalHighlightCount > 0 && selectedCount === totalHighlightCount;
+  const hasAnyReady = clips.length > 0;
+
   return (
-    <div className={className}>
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <h3 className="text-sm font-semibold text-[var(--muted-foreground)]">
-          Processed Videos · {videos.length} item
-          {videos.length !== 1 ? "s" : ""}
-        </h3>
+    <div className={cn("w-full", className)}>
+      {/* Header: left = filename + meta, right = selection/export actions */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="shrink-0 h-9 w-9 rounded-lg bg-[var(--primary)]/15 border border-[var(--primary)]/30 flex items-center justify-center">
+            <FileVideo className="h-4 w-4 text-[var(--primary)]" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-sm font-semibold truncate">{primary.name}</p>
+              <Badge
+                variant="outline"
+                className="text-[10px] h-5 border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
+              >
+                Ready
+              </Badge>
+              {selectionEnabled && totalHighlightCount > 0 && (
+                <Badge
+                  variant="outline"
+                  className="text-[10px] h-5 border-[var(--primary)]/40 bg-[var(--primary)]/10 text-[var(--primary)]"
+                >
+                  {selectedCount}/{totalHighlightCount} selected
+                </Badge>
+              )}
+            </div>
+            <p className="text-xs text-[var(--muted-foreground)] mt-0.5">
+              {formatBytes(primary.sizeBytes)} · {primary.mimeType}
+              {primary.durationSec != null
+                ? ` · ${formatClock(primary.durationSec)}`
+                : ""}
+            </p>
+          </div>
+        </div>
 
         <div className="flex items-center gap-1.5">
-          <Tooltip delayDuration={200}>
-            <TooltipTrigger asChild>
-              <Button variant="outline" size="sm" disabled>
-                <SquareCheck className="h-4 w-4" /> Select
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              Coming soon — pick highlights to merge.
-            </TooltipContent>
-          </Tooltip>
+          <Button
+            variant={selectionEnabled ? "default" : "outline"}
+            size="sm"
+            disabled={!hasAnyReady || exporting}
+            onClick={onToggleSelectionMode}
+            className={cn(
+              selectionEnabled &&
+                "bg-[var(--primary)] text-[var(--primary-foreground)] hover:bg-[var(--primary)]/90",
+            )}
+          >
+            {selectionEnabled ? (
+              <CheckSquare className="h-4 w-4" />
+            ) : (
+              <SquareCheck className="h-4 w-4" />
+            )}
+            {selectionEnabled ? "Picking" : "Select"}
+          </Button>
 
-          <Tooltip delayDuration={200}>
-            <TooltipTrigger asChild>
-              <Button variant="outline" size="sm" disabled>
-                <CheckSquare className="h-4 w-4" /> Select All
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              Coming soon — batch-select every clip below.
-            </TooltipContent>
-          </Tooltip>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={
+              !selectionEnabled || totalHighlightCount === 0 || exporting
+            }
+            onClick={onToggleSelectAll}
+          >
+            {allSelected ? (
+              <Square className="h-4 w-4" />
+            ) : (
+              <CheckSquare className="h-4 w-4" />
+            )}
+            {allSelected ? "Clear All" : "Select All"}
+          </Button>
 
-          <Tooltip delayDuration={200}>
-            <TooltipTrigger asChild>
-              <Button variant="default" size="sm" disabled>
-                <ScissorsLineDashed className="h-4 w-4" /> Export
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              Coming soon — Export API in development. Will call
-              POST /exports to render mp4 via server-side ffmpeg.
-            </TooltipContent>
-          </Tooltip>
+          <Button
+            variant="default"
+            size="sm"
+            disabled={!selectionEnabled || selectedCount === 0 || exporting}
+            onClick={onExport}
+            className="gap-1.5"
+          >
+            {exporting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ScissorsLineDashed className="h-4 w-4" />
+            )}
+            {exporting
+              ? "Exporting…"
+              : selectedCount > 0
+                ? `Export ${selectedCount} clip${
+                    selectedCount !== 1 ? "s" : ""
+                  }`
+                : "Export"}
+          </Button>
 
           <div className="w-px h-6 bg-[var(--border)] mx-1" />
 
@@ -74,15 +179,137 @@ export function UploadQueue({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {videos.map((v) => (
-          <VideoCard
-            key={v.id}
-            video={v}
-            onPreview={onPreview}
-            onRemove={onRemove}
-          />
-        ))}
+      {/* Clips grid: fill entire width, responsive 3/2/1 */}
+      {clips.length > 0 ? (
+        <div className="w-full grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {clips.map(({ clip, video }) => (
+            <ClipCard
+              key={clip.id}
+              clip={clip}
+              video={video}
+              selectionEnabled={selectionEnabled}
+              selected={selectedHighlightIds?.has(clip.id) ?? false}
+              onToggleSelect={onToggleHighlight}
+              onPreviewClip={() => onPreviewClip(video, clip)}
+              onRemoveClip={() => onRemoveClip(video, clip)}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="w-full rounded-xl border border-dashed border-[var(--border)] bg-[var(--card)]/50 px-4 py-12 text-center">
+          <p className="text-sm text-[var(--muted-foreground)]">
+            Processing highlights… check back shortly.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClipCard({
+  clip,
+  video,
+  selectionEnabled,
+  selected,
+  onToggleSelect,
+  onPreviewClip,
+  onRemoveClip,
+}: {
+  clip: Highlight;
+  video: UploadedVideo;
+  selectionEnabled: boolean;
+  selected: boolean;
+  onToggleSelect?: (id: string) => void;
+  onPreviewClip: () => void;
+  onRemoveClip: () => void;
+}) {
+  const conf = Math.max(
+    0,
+    Math.min(100, Math.round((clip.confidence ?? 0) * 100)),
+  );
+  const score = clip.metadata?.score as number | undefined;
+  const team = clip.metadata?.teamSide as string | undefined;
+  const dur = Math.max(0, (clip.endTime ?? 0) - (clip.startTime ?? 0));
+  return (
+    <div
+      className={cn(
+        "group relative rounded-xl border bg-[var(--card)] overflow-hidden flex flex-col transition-all",
+        "border-[var(--border)] hover:border-[var(--primary)]/50 hover:shadow-lg",
+        selected &&
+          "ring-2 ring-[var(--primary)] ring-offset-2 ring-offset-[var(--background)]",
+      )}
+    >
+      <HighlightClipPlayer
+        clip={clip}
+        video={video}
+        selectionEnabled={selectionEnabled}
+        selected={selected}
+        onToggleSelect={() => onToggleSelect?.(clip.id)}
+        className="aspect-video w-full rounded-none border-0 bg-black"
+      />
+
+      <div className="flex-1 p-3 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-xs text-[var(--muted-foreground)]">
+            {formatClock(clip.startTime ?? 0)} –{" "}
+            {formatClock(clip.endTime ?? 0)}
+          </span>
+          <span className="text-xs font-semibold">· {clip.type}</span>
+          {score != null && (
+            <Badge
+              variant="secondary"
+              className="h-4 text-[10px] bg-sky-500/15 text-sky-500 border-none"
+            >
+              {score}PT
+            </Badge>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            variant="outline"
+            className={cn(
+              "h-5 text-[10px] border-none",
+              team === "AWAY"
+                ? "bg-rose-500/15 text-rose-500"
+                : "bg-emerald-500/15 text-emerald-600",
+            )}
+          >
+            {team ?? "HOME"}
+          </Badge>
+          <Badge
+            variant="outline"
+            className="h-5 text-[10px] border-amber-500/40 text-amber-400 bg-amber-500/10"
+          >
+            MOCK
+          </Badge>
+          <span className="text-xs text-[var(--muted-foreground)]">
+            clip · {formatClock(dur)}
+          </span>
+          <span className="text-xs text-[var(--muted-foreground)]">
+            conf {conf}%
+          </span>
+        </div>
+
+        <div className="pt-2 flex items-center justify-end gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onPreviewClip}
+            className="h-8 px-2.5"
+          >
+            <Play className="h-3.5 w-3.5" />
+            <span className="ml-1 text-xs">Preview</span>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onRemoveClip}
+            className="h-8 px-2.5 text-destructive hover:text-destructive"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span className="ml-1 text-xs">Delete</span>
+          </Button>
+        </div>
       </div>
     </div>
   );

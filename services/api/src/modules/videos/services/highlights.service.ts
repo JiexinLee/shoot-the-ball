@@ -1,7 +1,10 @@
 import { z } from "zod";
+import type { Highlight, Video } from "@prisma/client";
 import { env } from "../../../config/env";
 import { logger } from "../../../config/logger";
 import { serializeBigInts } from "../../../utils/serialize";
+import { createPresignedDownload } from "../../../storage/object-storage";
+import { trimAndUploadClip } from "../../../media/clip-trimmer";
 import { videosRepository } from "../repositories/videos.repository";
 import {
   highlightsRepository,
@@ -113,9 +116,7 @@ async function maybeGenerateAndSaveMockHighlights(
 ): Promise<boolean> {
   // ① flag 关了 → 立刻跳过，不做任何事
   if (!useMock) return false;
-  // ② DB 里已经有 highlights → 不该覆盖，跳过
-  if (currentHighlightCount > 0) return false;
-  // ③ 状态还没到能看 Review 的程度（还在 UPLOADING / ARCHIVED 之类）也不生成
+  // ② 状态还没到能看 Review 的程度（还在 UPLOADING / ARCHIVED 之类）也不生成
   const statusOk =
     video.status === "UPLOADED" ||
     video.status === "PROCESSING" ||
@@ -124,10 +125,14 @@ async function maybeGenerateAndSaveMockHighlights(
   if (!statusOk) return false;
 
   const videoId = video.id;
-  const duration = (video.duration ?? 60) as number;
-  const pre = Number(process.env.AI_DEFAULT_HIGHLIGHT_PRE_SECONDS ?? "5") || 5;
+  const rawDuration = (video.duration ?? 0) as number;
+  const pre = Number(process.env.AI_DEFAULT_HIGHLIGHT_PRE_SECONDS ?? "2") || 2;
   const post =
-    Number(process.env.AI_DEFAULT_HIGHLIGHT_POST_SECONDS ?? "3") || 3;
+    Number(process.env.AI_DEFAULT_HIGHLIGHT_POST_SECONDS ?? "2") || 2;
+  const minClipDuration = pre + post;
+  // rawDuration 可能 null → 用 min(20, 合理最小值) 的 fallback，但永远不要超 20，更不要之前的 60
+  const duration =
+    rawDuration > 0 ? rawDuration : Math.max(20, minClipDuration + 1);
 
   type FakeEvent = {
     eventTime: number;
@@ -138,37 +143,39 @@ async function maybeGenerateAndSaveMockHighlights(
     endTime: number;
     type: HighlightType;
   };
+  const maxEventTime = Math.max(pre + 0.1, duration - post - 0.1);
   const base: Omit<FakeEvent, "startTime" | "endTime">[] = [
     {
-      eventTime: Math.max(pre, Math.floor(duration * 0.25)),
+      eventTime: Math.min(maxEventTime, Math.max(pre + 0.2, duration * 0.25)),
       score: 2,
       teamSide: "HOME",
       confidence: 0.9,
       type: "MADE_BASKET",
     },
     {
-      eventTime: Math.max(pre + 1, Math.floor(duration * 0.5)),
+      eventTime: Math.min(maxEventTime, Math.max(pre + 0.5, duration * 0.55)),
       score: 3,
       teamSide: "HOME",
       confidence: 0.85,
       type: "THREE_POINTER",
     },
   ];
-  // 视频够长（>30s）再加一条客场进球
-  if (duration > 30) {
+  if (duration > minClipDuration * 3 + 2) {
     base.push({
-      eventTime: Math.max(pre + 2, Math.floor(duration * 0.78)),
+      eventTime: Math.min(maxEventTime, Math.max(pre + 1, duration * 0.8)),
       score: 2,
       teamSide: "AWAY",
       confidence: 0.78,
       type: "MADE_BASKET",
     });
   }
-  const evList: FakeEvent[] = base.map((ev) => ({
-    ...ev,
-    startTime: Math.max(0, ev.eventTime - pre),
-    endTime: Math.min(duration, ev.eventTime + post),
-  }));
+  const evList: FakeEvent[] = base
+    .map((ev) => {
+      const startTime = Math.max(0, ev.eventTime - pre);
+      const endTime = Math.min(duration, ev.eventTime + post);
+      return { ...ev, startTime, endTime };
+    })
+    .filter((ev) => ev.endTime - ev.startTime >= 0.5);
 
   const inserts: HighlightCreateManyInput[] = evList.map((ev) => ({
     videoId,
@@ -198,6 +205,78 @@ async function maybeGenerateAndSaveMockHighlights(
   return true;
 }
 
+type HighlightWithVideo = Highlight & {
+  video: Pick<Video, "id" | "storageKey">;
+};
+
+async function ensureClipArtifactsForHighlights(
+  video: { id: string; storageKey: string | null },
+  rows: Array<{
+    id: string;
+    startTime: number;
+    endTime: number;
+    clipStorageKey: string | null;
+    clipUrl: string | null;
+  }>,
+): Promise<void> {
+  if (!video.storageKey) return;
+  const sourceKey = video.storageKey;
+  const needTrims = rows.filter((r) => !r.clipStorageKey);
+  // 串行执行，避免 spawn 太多 ffmpeg 子进程打爆 CPU / 带宽
+  for (const row of needTrims) {
+    const res = await trimAndUploadClip({
+      videoId: video.id,
+      highlightId: row.id,
+      sourceStorageKey: sourceKey,
+      startSec: row.startTime,
+      endSec: row.endTime,
+    });
+    if (res.ok) {
+      try {
+        await highlightsRepository.updateClipArtifacts(row.id, {
+          clipStorageKey: res.clipStorageKey,
+        });
+      } catch (e) {
+        logger.error(
+          { highlightId: row.id, err: e },
+          "ensureClipArtifacts: update clipStorageKey failed",
+        );
+      }
+    } else {
+      logger.warn(
+        { highlightId: row.id, err: res.error },
+        "ensureClipArtifacts: trim failed, skip and will fallback to full video clamp",
+      );
+    }
+  }
+}
+
+async function attachPresignedClipUrls(
+  rows: HighlightWithVideo[],
+): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    const r: Record<string, unknown> = { ...row };
+    if (row.clipStorageKey && !row.clipUrl) {
+      try {
+        const signed = await createPresignedDownload(
+          "exports",
+          row.clipStorageKey,
+        );
+        r.clipUrl = signed.url;
+      } catch (e) {
+        logger.warn(
+          { highlightId: row.id, err: e },
+          "attachPresignedClipUrls: sign clipUrl failed, keep null fallback",
+        );
+        r.clipUrl = row.clipUrl;
+      }
+    }
+    out.push(r);
+  }
+  return out;
+}
+
 /**
  * Fetch active (non-deleted) highlights for a video ordered by eventTime ASC.
  *
@@ -208,29 +287,72 @@ async function maybeGenerateAndSaveMockHighlights(
 export async function getVideoHighlights(
   userId: string,
   videoId: string,
+  durationHint?: number,
 ): Promise<ServiceResult<GetVideoHighlightsOutput>> {
   const video = await videosRepository.findByIdAndUserId(videoId, userId);
   if (!video) {
     return { error: { code: 404, message: "Video not found" } };
   }
   // TODO(Review): cursor / limit pagination when highlights >500
-  const highlights = await highlightsRepository.listActiveByVideoId(videoId);
+  let highlights =
+    await highlightsRepository.listActiveWithStorageByVideoId(videoId);
 
   // 「env 开关」只在调用侧这里计算，不污染抽离出来的纯逻辑方法
   const useMock: boolean =
     env.APP_ENV === "development" && env.DEV_MOCK_PROCESSING;
 
+  // 用户要求 L125-132 原代码保持不动。如果 DB video.duration 是 null/0，
+  // 就用前端 probe 传上来的 durationHint 覆盖成真值，
+  // 这样 mock 生成比例是按真时长 spread 的，不会 fallback=20 导致 clips 挤在前17秒。
+  let mockableVideo: MockableVideo = video;
+  if (useMock) {
+    const dur: number | null | undefined = video.duration;
+    const needsHint = !dur || Number(dur) <= 0 || !Number.isFinite(Number(dur));
+    if (
+      needsHint &&
+      typeof durationHint === "number" &&
+      Number.isFinite(durationHint) &&
+      durationHint > 0
+    ) {
+      mockableVideo = { ...video, duration: durationHint };
+    }
+  }
+
   const wroteMock = await maybeGenerateAndSaveMockHighlights(
-    video,
+    mockableVideo,
     highlights.length,
     useMock,
   );
   if (wroteMock) {
-    const after = await highlightsRepository.listActiveByVideoId(videoId);
-    return { ok: { highlights: serializeBigInts(after) } };
+    highlights =
+      await highlightsRepository.listActiveWithStorageByVideoId(videoId);
   }
 
-  return { ok: { highlights: serializeBigInts(highlights) } };
+  try {
+    await ensureClipArtifactsForHighlights(
+      { id: video.id, storageKey: video.storageKey ?? null },
+      highlights.map((h) => ({
+        id: h.id,
+        startTime: h.startTime,
+        endTime: h.endTime,
+        clipStorageKey: h.clipStorageKey,
+        clipUrl: h.clipUrl,
+      })),
+    );
+    // 重新拿一次 DB 最新 clipStorageKey
+    highlights =
+      await highlightsRepository.listActiveWithStorageByVideoId(videoId);
+  } catch (e) {
+    logger.error(
+      { videoId, err: e },
+      "getVideoHighlights: ensureClipArtifacts failed, continue without clip artifacts",
+    );
+  }
+
+  const withUrls = await attachPresignedClipUrls(
+    highlights as HighlightWithVideo[],
+  );
+  return { ok: { highlights: serializeBigInts(withUrls) } };
 }
 
 export const highlightsService = {

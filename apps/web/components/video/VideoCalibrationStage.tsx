@@ -68,6 +68,8 @@ export function VideoCalibrationStage({
 }: VideoCalibrationStageProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  /** 拖动 Slider 期间屏蔽 onTimeUpdate 的 state 回写，防止 thumb 回弹 */
+  const isDraggingSliderRef = useRef(false);
 
   const [state, setState] = useState<StageCalibration>({
     mode: "hoop",
@@ -78,6 +80,10 @@ export function VideoCalibrationStage({
   });
 
   const [currentTimeSec, setCurrentTimeSec] = useState<number>(0);
+  /** 真实视频时长（从 loadedmetadata 的 video.duration 来，覆盖 props 的 durationSec 防止传错） */
+  const [realDuration, setRealDuration] = useState<number>(
+    Math.max(1, durationSec ?? 1),
+  );
   /** 🔥 真实视频渲染区域（去 letterbox 黑边后）相对外层 "h-full w-full flex" 盒子的像素 rect */
   const [videoRenderRect, setVideoRenderRect] = useState<{
     x: number;
@@ -85,6 +91,61 @@ export function VideoCalibrationStage({
     w: number;
     h: number;
   } | null>(null);
+
+  /* —— 统一的 seek 工具：paused 时强制触发解码渲染，避免 set currentTime 画面不动 —— */
+  const seekVideoTo = useCallback(
+    (targetSec: number) => {
+      const v = videoRef.current;
+      if (!v) return;
+      const maxDur =
+        Number.isFinite(v.duration) && v.duration > 0
+          ? v.duration
+          : realDuration;
+      const clamped = Math.max(0, Math.min(maxDur, targetSec));
+      const wasPaused = v.paused || v.ended;
+      const wasMuted = v.muted;
+      try {
+        v.currentTime = clamped;
+        if (wasPaused) {
+          v.muted = true;
+          const p = v.play();
+          if (p && typeof (p as Promise<void>).then === "function") {
+            (p as Promise<void>)
+              .then(() => {
+                try {
+                  v.pause();
+                  v.muted = wasMuted;
+                  setCurrentTimeSec(v.currentTime);
+                } catch {
+                  /* ignore */
+                }
+              })
+              .catch(() => {
+                try {
+                  v.muted = wasMuted;
+                  setCurrentTimeSec(v.currentTime);
+                } catch {
+                  /* ignore */
+                }
+              });
+          } else {
+            try {
+              v.pause();
+              v.muted = wasMuted;
+            } catch {
+              /* ignore */
+            }
+            setCurrentTimeSec(clamped);
+          }
+        } else {
+          setCurrentTimeSec(clamped);
+        }
+      } catch {
+        /* ignore */
+      }
+    },
+    [realDuration],
+  );
 
   /* —— 计算真实视频渲染区域（和 computeNormPoint 算法完全对称，输出像素 rect） —— */
   const recomputeRenderRect = useCallback(() => {
@@ -139,21 +200,20 @@ export function VideoCalibrationStage({
 
   const nw = naturalWidth ?? 1920;
   const nh = naturalHeight ?? 1080;
-  const dur = Math.max(1, durationSec ?? 1);
 
-  /* ----- 视频加载完毕：seek 到 defaultSeekSec or 30% ----- */
+  /* ----- 视频加载完毕：记录真实时长 + seek 到 defaultSeekSec or 30% ----- */
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const target =
-      typeof defaultSeekSec === "number" ? defaultSeekSec : dur * 0.3;
+    const targetSec = (t: number) =>
+      typeof defaultSeekSec === "number" ? defaultSeekSec : t * 0.3;
     const onMeta = () => {
       try {
-        v.currentTime = Math.max(0, Math.min(v.duration || dur, target));
-        v.pause();
+        const trueDur =
+          Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 1;
+        setRealDuration(trueDur);
+        seekVideoTo(targetSec(trueDur));
         setIsReady(true);
-        setCurrentTimeSec(v.currentTime);
-        // 🔑 metadata 好后立刻重新算 renderRect（videoWidth/videoHeight 才有值）
         recomputeRenderRect();
       } catch {
         /* ignore */
@@ -161,7 +221,8 @@ export function VideoCalibrationStage({
     };
     v.addEventListener("loadedmetadata", onMeta);
     return () => v.removeEventListener("loadedmetadata", onMeta);
-  }, [previewUrl, defaultSeekSec, dur, recomputeRenderRect]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewUrl, defaultSeekSec, recomputeRenderRect]);
 
   /* ----- 把鼠标 clientX/Y → → video render area 内 norm [0,1] ----- */
   const computeNormPoint = useCallback((clientX: number, clientY: number) => {
@@ -245,21 +306,27 @@ export function VideoCalibrationStage({
   );
 
   /* ----- Slider seek ----- */
-  const handleSliderChange = useCallback((v: number[]) => {
-    const t = v[0] ?? 0;
-    const video = videoRef.current;
-    if (video) {
-      try {
-        video.currentTime = Math.max(0, Math.min(video.duration || t, t));
-        video.pause();
-      } catch {
-        /* ignore */
-      }
-    }
-    setCurrentTimeSec(t);
-  }, []);
+  const handleSliderChange = useCallback(
+    (v: number[]) => {
+      const t = v[0] ?? 0;
+      isDraggingSliderRef.current = true;
+      seekVideoTo(t);
+      setCurrentTimeSec(t);
+    },
+    [seekVideoTo],
+  );
+
+  const handleSliderCommit = useCallback(
+    (v: number[]) => {
+      const t = v[0] ?? 0;
+      isDraggingSliderRef.current = false;
+      seekVideoTo(t);
+    },
+    [seekVideoTo],
+  );
 
   const handleTimeUpdate = () => {
+    if (isDraggingSliderRef.current) return;
     const v = videoRef.current;
     if (!v) return;
     setCurrentTimeSec(v.currentTime);
@@ -305,26 +372,30 @@ export function VideoCalibrationStage({
     <div className={cn("flex h-full flex-col gap-3 overflow-auto", className)}>
       <Alert className="border-amber-500/40 bg-amber-500/5">
         <AlertTitle className="flex items-center gap-2 text-sm font-semibold">
-          <Sparkles className="h-4 w-4 text-amber-500" /> Calibration Required
-          Before AI Analysis
+          <Sparkles className="h-4 w-4 text-amber-500" /> Calibrate Hoop &amp;
+          Court
         </AlertTitle>
         <AlertDescription className="mt-1 text-sm leading-relaxed">
-          <span>Mark:</span>
-          <span className="font-semibold text-xs">
-            Hoop <span className="text-rose-500">*</span>
-          </span>
-          <span className="font-semibold text-xs">Court</span>
-          <div className="text-xs">
-            Find a clear frame using the timeline, switch modes with the
-            buttons, then click twice on the video (top-left → bottom-right) to
-            draw each box.
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <span>
+              Required:{" "}
+              <span className="font-semibold">
+                Hoop <span className="text-rose-500">*</span>
+              </span>
+            </span>
+            <span>
+              Optional: <span className="font-semibold">Court</span>
+            </span>
+            <span className="text-[var(--muted-foreground)]">
+              Pick a frame → choose a mode → mark 2 corners per box.
+            </span>
           </div>
-          <span className="mt-1 block text-[var(--muted-foreground)]">
-            or Click{" "}
+          <span className="mt-1 block text-xs text-[var(--muted-foreground)]">
+            Tip:{" "}
             <span className="font-mono font-bold text-amber-300">
               Auto Calibrate (AI)
             </span>{" "}
-            to have the ai-worker suggest initial boxes, then tweak manually.
+            will suggest boxes once AI worker is connected.
           </span>
         </AlertDescription>
       </Alert>
@@ -526,9 +597,13 @@ export function VideoCalibrationStage({
               </div>
             )}
 
-          {/* Bottom hint banner — 保持外层（全宽），因为是全局提示，不要求对齐视频 */}
-          <div className="pointer-events-none absolute bottom-0 left-0 right-0 flex items-center justify-center bg-gradient-to-t from-black/70 to-transparent px-4 py-3">
-            <p className="text-xs font-medium text-white/90">{cursorHint}</p>
+          {/* Bottom hint banner — 毛玻璃边框背景 + 明显的圆角胶囊 */}
+          <div className="pointer-events-none absolute bottom-0 left-0 right-0 flex items-center justify-center px-4 pb-4 pt-8 bg-gradient-to-t from-black/60 to-transparent">
+            <div className="pointer-events-none backdrop-blur-md bg-black/50 border border-white/15 rounded-full px-4 py-2 shadow-xl ring-1 ring-black/20 shadow-black/40">
+              <p className="text-xs font-semibold text-white tracking-wide">
+                {cursorHint}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -545,17 +620,18 @@ export function VideoCalibrationStage({
         <div className="flex items-center justify-between text-xs text-[var(--muted-foreground)]">
           <span className="font-mono">{formatClock(currentTimeSec)}</span>
           <span className="font-semibold text-[var(--foreground)]">
-            Find a clear frame · scrub the timeline · then click boxes above
+            Drag the timeline to find a clear hoop view
           </span>
-          <span className="font-mono">{formatClock(dur)}</span>
+          <span className="font-mono">{formatClock(realDuration)}</span>
         </div>
         <Slider
           min={0}
-          max={dur}
+          max={realDuration}
           step={0.01}
           value={[currentTimeSec]}
           onValueChange={handleSliderChange}
-          className="w-full"
+          onValueCommit={handleSliderCommit}
+          className="w-full cursor-grab active:cursor-grabbing"
         />
       </div>
     </div>

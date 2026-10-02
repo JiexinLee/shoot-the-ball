@@ -1,6 +1,7 @@
 "use client";
 
-import { Play, X, CheckCircle2, Trash2, Film } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { Play, Trash2, Film, Check } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -22,82 +23,43 @@ interface VideoCardProps {
   video: UploadedVideo;
   onPreview: (video: UploadedVideo) => void;
   onRemove: (video: UploadedVideo) => void;
+  selectionEnabled?: boolean;
+  selectedHighlightIds?: Set<string>;
+  onToggleHighlight?: (highlightId: string) => void;
 }
 
-export function VideoCard({ video, onPreview, onRemove }: VideoCardProps) {
+export function VideoCard({
+  video,
+  onPreview,
+  onRemove,
+  selectionEnabled = false,
+  selectedHighlightIds,
+  onToggleHighlight,
+}: VideoCardProps) {
   const showProgress =
     video.status === "uploading" ||
     video.status === "processing" ||
     video.status === "calibrating";
 
+  const hasHighlights = video.highlights && video.highlights.length > 0;
+
   return (
     <Card className="group overflow-hidden border transition-all hover:border-[var(--primary)]/40">
-      <div className="relative aspect-video w-full overflow-hidden bg-black">
-        <video
-          src={video.previewUrl}
-          muted
-          preload="metadata"
-          className="h-full w-full object-cover"
-          poster=""
-          onMouseEnter={(e) => {
-            const el = e.currentTarget;
-            el.currentTime = Math.min((video.durationSec ?? 5) / 3, 3);
-            el.play().catch(() => {});
-          }}
-          onMouseLeave={(e) => {
-            const el = e.currentTarget;
-            el.pause();
-          }}
-        />
-        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent p-3">
-          <div className="flex items-center justify-between text-xs text-white/80">
-            <span>{formatDuration(video.durationSec)}</span>
-            {video.width && video.height && (
-              <span>
-                {video.width}×{video.height}
-              </span>
-            )}
-          </div>
-        </div>
-        <button
-          type="button"
-          aria-label="Preview"
-          onClick={() => onPreview(video)}
-          className="absolute left-1/2 top-1/2 flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-[var(--primary)]/95 text-[var(--primary-foreground)] opacity-0 shadow-lg transition-all hover:scale-110 group-hover:opacity-100"
-        >
-          <Play className="h-5 w-5 translate-x-0.5" />
-        </button>
-        <button
-          type="button"
-          aria-label="Remove"
-          onClick={() => onRemove(video)}
-          className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-white/80 opacity-0 backdrop-blur transition-all hover:bg-black/80 hover:text-white group-hover:opacity-100"
-        >
-          <X className="h-4 w-4" />
-        </button>
-        {video.status === "success" && (
-          <CheckCircle2 className="absolute left-2 top-2 h-5 w-5 text-emerald-400" />
-        )}
-        {video.status === "calibrating" && (
-          <Badge
-            variant="secondary"
-            className="absolute left-2 top-2 h-5 bg-amber-500/15 text-[11px] text-amber-500 border border-amber-500/30"
-          >
-            Calibrating…
-          </Badge>
-        )}
-      </div>
-
       <CardHeader className="p-4 pb-2">
         <div className="flex items-start justify-between gap-2">
-          <CardTitle className="line-clamp-1 text-sm font-medium">
-            {video.name}
-          </CardTitle>
+          <div className="min-w-0 flex-1">
+            <CardTitle className="line-clamp-1 text-sm font-medium">
+              {video.name}
+            </CardTitle>
+            <CardDescription className="mt-1">
+              {formatBytes(video.sizeBytes)} · {video.mimeType}
+              {video.durationSec
+                ? ` · ${formatDuration(video.durationSec)}`
+                : ""}
+            </CardDescription>
+          </div>
           <StatusBadge status={video.status} progress={video.progress} />
         </div>
-        <CardDescription className="mt-1">
-          {formatBytes(video.sizeBytes)} · {video.mimeType}
-        </CardDescription>
       </CardHeader>
 
       <CardContent className="space-y-2 p-4 pt-0">
@@ -108,22 +70,20 @@ export function VideoCard({ video, onPreview, onRemove }: VideoCardProps) {
           </p>
         )}
 
-        {video.highlights && video.highlights.length > 0 && (
-          <div className="mt-2 space-y-2 rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-2.5">
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-600">
-              <Film className="h-3.5 w-3.5" /> Highlight Clips (
-              {video.highlights.length})
-            </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {video.highlights.map((h) => (
-                <HighlightClipPlayer
-                  key={h.id}
-                  highlight={h}
-                  previewUrl={video.previewUrl}
-                />
-              ))}
-            </div>
-          </div>
+        {hasHighlights ? (
+          <HighlightsSection
+            highlights={video.highlights!}
+            previewUrl={video.previewUrl}
+            selectionEnabled={selectionEnabled}
+            selectedHighlightIds={selectedHighlightIds}
+            onToggleHighlight={onToggleHighlight}
+          />
+        ) : (
+          video.status === "success" && (
+            <p className="py-6 text-center text-xs text-[var(--muted-foreground)]">
+              No highlights detected yet.
+            </p>
+          )
         )}
       </CardContent>
 
@@ -139,59 +99,216 @@ export function VideoCard({ video, onPreview, onRemove }: VideoCardProps) {
         <Button
           variant="default"
           size="sm"
-          disabled={video.status !== "success" && !video.highlights}
           onClick={() => onPreview(video)}
+          className="gap-1.5"
         >
-          <Play className="h-4 w-4" /> Preview
+          <Play className="h-4 w-4" /> Preview Video
         </Button>
       </CardFooter>
     </Card>
   );
 }
 
-function HighlightClipPlayer({
-  highlight,
+function HighlightsSection({
+  highlights,
   previewUrl,
+  selectionEnabled,
+  selectedHighlightIds,
+  onToggleHighlight,
 }: {
-  highlight: Highlight;
+  highlights: Highlight[];
   previewUrl: string;
+  selectionEnabled?: boolean;
+  selectedHighlightIds?: Set<string>;
+  onToggleHighlight?: (id: string) => void;
 }) {
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-2.5">
+      <div className="flex items-center justify-between gap-1.5 text-[11px] font-semibold text-emerald-600">
+        <div className="flex items-center gap-1.5">
+          <Film className="h-3.5 w-3.5" /> Highlight Clips ({highlights.length})
+        </div>
+        {selectionEnabled && selectedHighlightIds && (
+          <span className="font-mono text-emerald-700/80">
+            selected:{" "}
+            {highlights.filter((h) => selectedHighlightIds.has(h.id)).length}/
+            {highlights.length}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {highlights.map((h) => (
+          <HighlightClipPlayer
+            key={h.id}
+            highlight={h}
+            previewUrl={previewUrl}
+            selectionEnabled={selectionEnabled}
+            selected={selectedHighlightIds?.has(h.id) ?? false}
+            onToggleSelect={() => onToggleHighlight?.(h.id)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function HighlightClipPlayer({
+  highlight,
+  clip,
+  previewUrl,
+  video,
+  selectionEnabled,
+  selected,
+  onToggleSelect,
+  className,
+}: {
+  highlight?: Highlight;
+  clip?: Highlight;
+  previewUrl?: string;
+  video?: UploadedVideo;
+  selectionEnabled?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
+  className?: string;
+}) {
+  // React Hooks 必须放在所有 early return 之前，顺序一致。
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+
+  const h = highlight ?? clip;
+  // 优先用后端裁剪好的短 clip URL（整个 MP4 只有 [start,end] 几秒钟，
+  // 原生进度条会正确显示 0:04/0:04 而不是 0:04/0:17 全视频）；
+  // 没有裁剪 URL 才 fallback 到原视频 + 旧的 timeupdate clamp。
+  const clipUrl = typeof h?.clipUrl === "string" ? h.clipUrl : null;
+  const src = clipUrl ?? previewUrl ?? video?.previewUrl;
+  const isTrimmedClip = Boolean(clipUrl);
+
   const score =
-    typeof highlight.metadata?.score === "number"
-      ? (highlight.metadata.score as number)
+    h && typeof h.metadata?.score === "number"
+      ? (h.metadata.score as number)
       : null;
   const teamSide =
-    typeof highlight.metadata?.teamSide === "string"
-      ? (highlight.metadata.teamSide as string).toUpperCase()
+    h && typeof h.metadata?.teamSide === "string"
+      ? (h.metadata.teamSide as string).toUpperCase()
       : null;
-  /* 兼容新旧字段名：contracts 定稿是 startTime/endTime，旧本地类型是 startTimeSec */
-  const start = Number.isFinite(highlight.startTime)
-    ? Number(highlight.startTime)
-    : Number.isFinite(highlight.startTimeSec)
-      ? Number(highlight.startTimeSec)
-      : 0;
-  const end = Number.isFinite(highlight.endTime)
-    ? Number(highlight.endTime)
-    : Number.isFinite(highlight.endTimeSec)
-      ? Number(highlight.endTimeSec)
-      : start + 5;
-  const isMock = Boolean(highlight.metadata?.mock);
+  const start = h
+    ? Number.isFinite(h.startTime)
+      ? Number(h.startTime)
+      : Number.isFinite(h.startTimeSec)
+        ? Number(h.startTimeSec)
+        : 0
+    : 0;
+  const end = h
+    ? Number.isFinite(h.endTime)
+      ? Number(h.endTime)
+      : Number.isFinite(h.endTimeSec)
+        ? Number(h.endTimeSec)
+        : start + 5
+    : start + 5;
+  const isMock = Boolean(h?.metadata?.mock);
 
-  /* HTML5 Media Fragment #t=start,end —— 浏览器原生 seek 到 start，
-     播放到 end 自动停。MVP 阶段就当是「已经切好的 clip」来显示，
-     以后后端 Export API 渲染好真实 mp4 后，把 src 换成预签名 URL 即可。 */
-  const fragmentSrc = `${previewUrl}#t=${start.toFixed(2)},${end.toFixed(2)}`;
+  // 哪怕 h/src 暂时为空也必须先 call useEffect，否则 Rules of Hooks 会在 h 从 null→有值时顺序变。
+  useEffect(() => {
+    const v = videoElRef.current;
+    if (!v || !h || !src) return;
+
+    // 如果 src 是后端裁剪好的短 clip：整个 MP4 只有 [start,end] 片段，
+    // 只需要保证到末尾循环回 0 秒开始循环播放就行，不用做时间平移。
+    if (isTrimmedClip) {
+      const onTime = () => {
+        try {
+          if (
+            Number.isFinite(v.duration) &&
+            v.duration > 0.2 &&
+            v.currentTime >= v.duration - 0.05
+          ) {
+            v.currentTime = 0;
+          }
+        } catch {
+          /* ignore */
+        }
+      };
+      v.addEventListener("timeupdate", onTime);
+      return () => {
+        v.removeEventListener("timeupdate", onTime);
+      };
+    }
+
+    // fallback: 没裁好的全视频 URL：timeupdate clamp 在 [start,end] 范围，loadedmetadata seek 到 start
+    const hasRange = end > start;
+    const safeStart = hasRange ? start : 0;
+    const safeEnd = hasRange ? end : Infinity;
+    const seekToStart = (tolerance = 0) => {
+      try {
+        const duration = Number.isFinite(v.duration) ? v.duration : safeEnd;
+        const clamped = Math.max(0, Math.min(duration, safeStart));
+        if (tolerance <= 0 || Math.abs(v.currentTime - clamped) > tolerance) {
+          v.currentTime = clamped;
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    const onLoaded = () => seekToStart(0.05);
+    const onTime = () => {
+      try {
+        if (
+          hasRange &&
+          (v.currentTime < safeStart || v.currentTime >= safeEnd)
+        ) {
+          seekToStart(0);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    v.addEventListener("loadedmetadata", onLoaded);
+    v.addEventListener("timeupdate", onTime);
+    if (Number.isFinite(v.duration) && v.duration > 0) {
+      seekToStart(0.05);
+    }
+    return () => {
+      v.removeEventListener("loadedmetadata", onLoaded);
+      v.removeEventListener("timeupdate", onTime);
+    };
+  }, [h, src, start, end, isTrimmedClip]);
+
+  // early return 必须在所有 Hooks 之后
+  if (!h || !src) return null;
 
   return (
     <div
       className={cn(
-        "group overflow-hidden rounded-lg border bg-[var(--card)]",
+        "group relative overflow-hidden rounded-lg border bg-[var(--card)]",
         isMock ? "border-dashed border-amber-500/40" : "border-[var(--border)]",
+        selected &&
+          "ring-2 ring-[var(--primary)] ring-offset-1 ring-offset-[var(--background)]",
+        className,
       )}
     >
+      {selectionEnabled && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onToggleSelect?.();
+          }}
+          className={cn(
+            "absolute left-2 top-2 z-10 flex h-5 w-5 items-center justify-center rounded border shadow-sm backdrop-blur transition-all",
+            selected
+              ? "border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)]"
+              : "border-white/60 bg-black/30 text-white hover:bg-black/50",
+          )}
+          aria-label={selected ? "Unselect clip" : "Select clip"}
+        >
+          {selected && <Check className="h-3.5 w-3.5" />}
+        </button>
+      )}
+
       <div className="relative aspect-video w-full overflow-hidden bg-black">
         <video
-          src={fragmentSrc}
+          ref={videoElRef}
+          src={src}
           muted
           preload="metadata"
           controls
@@ -204,7 +321,7 @@ function HighlightClipPlayer({
             {formatDuration(start)} – {formatDuration(end)}
           </span>
           <span className="text-[var(--foreground)]">
-            · {highlight.type.replace(/_/g, " ")}
+            · {h.type.replace(/_/g, " ")}
           </span>
           {score && (
             <Badge
@@ -238,7 +355,7 @@ function HighlightClipPlayer({
         </div>
         <div className="flex items-center justify-between text-[10px] font-mono tabular-nums text-[var(--muted-foreground)]">
           <span>clip · {formatDuration(end - start)}</span>
-          <span>conf {(highlight.confidence * 100).toFixed(0)}%</span>
+          <span>conf {(h.confidence * 100).toFixed(0)}%</span>
         </div>
       </div>
     </div>

@@ -14,6 +14,30 @@ export async function listActiveByVideoId(videoId: string) {
   });
 }
 
+export async function listActiveWithStorageByVideoId(videoId: string) {
+  return prisma.highlight.findMany({
+    where: { videoId, deleted: false },
+    orderBy: { eventTime: "asc" },
+    include: {
+      video: { select: { storageKey: true, id: true } },
+    },
+  });
+}
+
+export async function updateClipArtifacts(
+  highlightId: string,
+  data: { clipStorageKey: string; clipUrl?: string | null },
+) {
+  return prisma.highlight.update({
+    where: { id: highlightId },
+    data: {
+      clipStorageKey: data.clipStorageKey,
+      clipUrl: data.clipUrl ?? undefined,
+    },
+    select: { id: true },
+  });
+}
+
 /**
  * 软删除旧 highlights + 批量写入新 highlights，原子事务。
  * 保持 requirement 第 73 条 "Delete 只改变 Highlight 状态"。
@@ -60,6 +84,8 @@ export async function createInTransaction(
 export const highlightsRepository = {
   countByVideoId,
   listActiveByVideoId,
+  listActiveWithStorageByVideoId,
   softDeleteAndCreateMany,
   createInTransaction,
+  updateClipArtifacts,
 };

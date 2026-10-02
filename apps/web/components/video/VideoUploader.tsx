@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { DropZone } from "./upload/DropZone";
 import { UploadQueue } from "./upload/UploadQueue";
 import { UploadWorkflowDialog } from "./UploadWorkflowDialog";
+import { VideoPreviewDialog } from "./VideoPreviewDialog";
 import type { UploadedVideo, Highlight } from "@/lib/types";
 import {
   generateUid,
@@ -16,6 +17,8 @@ import {
 } from "@/lib/api-client";
 import { formatBytes } from "@/lib/format";
 import { videos as apiVideos } from "@/lib/api/videos";
+import { exports_ } from "@/lib/api/exports";
+import { DEFAULT_PROJECT_ID } from "@/lib/api/upload";
 import { PageHeader } from "@/components/shared";
 
 export interface VideoUploaderProps {
@@ -34,11 +37,34 @@ export function VideoUploader({
   const [dragActive, setDragActive] = useState(false);
   const [videos, setVideos] = useState<UploadedVideo[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
-  /** 当前 Modal 里正在处理的 UploadedVideo（本地 id） */
   const [activeVideo, setActiveVideo] = useState<UploadedVideo | null>(null);
+
+  const [previewDialog, setPreviewDialog] = useState<{
+    video: UploadedVideo | null;
+    clipStart: number | null;
+    clipEnd: number | null;
+    clipTitle: string | null;
+    clipSrc: string | null;
+  }>({
+    video: null,
+    clipStart: null,
+    clipEnd: null,
+    clipTitle: null,
+    clipSrc: null,
+  });
+
+  const [selectionEnabled, setSelectionEnabled] = useState(false);
+  const [selectedHighlightIds, setSelectedHighlightIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [deletedHighlightIds, setDeletedHighlightIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [exporting, setExporting] = useState(false);
 
   const sseCleanupRef = useRef<Map<string, () => void>>(new Map());
   const aborterRef = useRef<Map<string, AbortController>>(new Map());
+  const exportPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
@@ -53,9 +79,40 @@ export function VideoUploader({
       aborterRef.current.forEach((ab) => ab.abort());
       aborterRef.current.clear();
       videos.forEach((v) => URL.revokeObjectURL(v.previewUrl));
+      if (exportPollTimerRef.current) {
+        clearTimeout(exportPollTimerRef.current);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const isHighlightVisible = useCallback(
+    (id: string) => !deletedHighlightIds.has(id),
+    [deletedHighlightIds],
+  );
+
+  const totalHighlightCount = useMemo(
+    () =>
+      videos.reduce(
+        (sum, v) =>
+          sum +
+          (v.highlights?.filter((h) => isHighlightVisible(h.id)).length ?? 0),
+        0,
+      ),
+    [videos, isHighlightVisible],
+  );
+
+  const allHighlightIds = useMemo(
+    () =>
+      videos.flatMap((v) =>
+        v.highlights
+          ? v.highlights
+              .filter((h) => isHighlightVisible(h.id))
+              .map((h) => h.id)
+          : [],
+      ),
+    [videos, isHighlightVisible],
+  );
 
   const updateVideo = (id: string, patch: Partial<UploadedVideo>) =>
     setVideos((prev) =>
@@ -85,8 +142,8 @@ export function VideoUploader({
     const jobId = v.jobId;
     const localId = v.id;
     const videoId = v.videoId;
+    const durationHint = v.durationSec;
 
-    // 同个 jobId 重复订阅了就先 cancel 旧的，防 rerender 叠两层 SSE
     const existing = sseCleanupRef.current.get(localId);
     if (existing) {
       try {
@@ -103,26 +160,22 @@ export function VideoUploader({
           updateVideo(localId, { progress: pct });
         },
         onCompleted: async () => {
-          // 1. 标 success
           updateVideo(localId, { progress: 100, status: "success" });
           sseCleanupRef.current.delete(localId);
 
-          // 2. SSE READY 后立刻 GET highlights，直接挂在 UploadedVideo 上，
-          //    VideoCard 就会在上传页卡片下方直接渲染 mini highlight list
           if (!videoId) return;
           try {
-            const { highlights } = await apiVideos.listHighlights(videoId);
+            const { highlights } = await apiVideos.listHighlights(videoId, {
+              durationHint,
+            });
             if (highlights && highlights.length > 0) {
               const patch = {
                 highlights: highlights as unknown as Highlight[],
               };
               updateVideo(localId, patch);
-            } else {
-              // 极端情况：SSE completed 了但 highlights GET 还没写好（DB 延迟），
-              // 给用户一个 空 mock 提示也可以，这里就什么都不做，保持 success。
             }
-          } catch (_e) {
-            // GET highlights 失败不影响主流程，VideoCard 只显示 success 绿色对勾
+          } catch {
+            /* ignore */
           }
         },
         onFailed: (err) => {
@@ -133,11 +186,9 @@ export function VideoUploader({
     );
   };
 
-  /* —— 拖/选文件：MVP 单文件，所以只取第一个，立刻开 Modal —— */
   const handleFilesAdded = async (files: FileList | File[]) => {
     const arr = Array.from(files).filter(isVideoFile);
     if (!arr.length) return;
-    // 强制单文件：只处理 files[0]
     const first = arr[0];
 
     const id = crypto.randomUUID ? crypto.randomUUID() : generateUid();
@@ -168,17 +219,37 @@ export function VideoUploader({
       return;
     }
 
-    // 打开 90% Modal：上传流程在 Dialog 内部执行
     setActiveVideo(created);
     setDialogOpen(true);
   };
 
   const handleRemove = (v: UploadedVideo) => {
     cleanupUpload(v.id, v.previewUrl);
+    if (v.highlights) {
+      setSelectedHighlightIds((prev) => {
+        const next = new Set(prev);
+        v.highlights!.forEach((h) => next.delete(h.id));
+        return next;
+      });
+      setDeletedHighlightIds((prev) => {
+        const next = new Set(prev);
+        v.highlights!.forEach((h) => next.delete(h.id));
+        return next;
+      });
+    }
     setVideos((prev) => prev.filter((x) => x.id !== v.id));
     if (activeVideo?.id === v.id) {
       setActiveVideo(null);
       setDialogOpen(false);
+    }
+    if (previewDialog.video?.id === v.id) {
+      setPreviewDialog({
+        video: null,
+        clipStart: null,
+        clipEnd: null,
+        clipTitle: null,
+        clipSrc: null,
+      });
     }
     onRemove?.(v);
   };
@@ -188,9 +259,18 @@ export function VideoUploader({
     setVideos([]);
     setActiveVideo(null);
     setDialogOpen(false);
+    setSelectedHighlightIds(new Set());
+    setDeletedHighlightIds(new Set());
+    setSelectionEnabled(false);
+    setPreviewDialog({
+      video: null,
+      clipStart: null,
+      clipEnd: null,
+      clipTitle: null,
+      clipSrc: null,
+    });
   };
 
-  /* —— Dialog callbacks —— 全部 useCallback 稳定引用，避免 effect 死循环 */
   const handleOnVideoId = useCallback((localId: string, videoId: string) => {
     setVideos((prev) =>
       prev.map((v) =>
@@ -200,7 +280,6 @@ export function VideoUploader({
   }, []);
 
   const handleOnUploadComplete = useCallback((localId: string) => {
-    // 上传 complete 完下一步就是 calibration，UI 端 local 状态先改 calibrating
     setVideos((prev) =>
       prev.map((v) =>
         v.id === localId ? { ...v, progress: 100, status: "calibrating" } : v,
@@ -211,7 +290,6 @@ export function VideoUploader({
   const handleOnProcessingStarted = useCallback(
     (payload: { localId: string; videoId: string; jobId: string }) => {
       const { localId, jobId } = payload;
-      // 1. 先把本地状态切 processing，进度 0
       let target: UploadedVideo | undefined;
       setVideos((prev) => {
         const next = prev.map((v) =>
@@ -222,11 +300,9 @@ export function VideoUploader({
         target = next.find((v) => v.id === localId);
         return next;
       });
-      // 2. 挂 SSE（它内部会等 READY 然后 GET highlights）
       if (target) {
         beginSubscribeJobProgress(target);
       } else {
-        // fallback：从下一轮 setVideos 里找
         setTimeout(() => {
           setVideos((prev) => {
             const v = prev.find((x) => x.id === localId);
@@ -249,6 +325,162 @@ export function VideoUploader({
     setActiveVideo(null);
     setDialogOpen(false);
   }, []);
+
+  const handleToggleSelectionMode = useCallback(() => {
+    setSelectionEnabled((prev) => {
+      const next = !prev;
+      if (!next) {
+        setSelectedHighlightIds(new Set());
+      }
+      return next;
+    });
+  }, []);
+
+  const handleToggleSelectAll = useCallback(() => {
+    const allSelected =
+      totalHighlightCount > 0 &&
+      selectedHighlightIds.size === totalHighlightCount;
+    if (allSelected) {
+      setSelectedHighlightIds(new Set());
+    } else {
+      setSelectedHighlightIds(new Set(allHighlightIds));
+    }
+  }, [allHighlightIds, totalHighlightCount, selectedHighlightIds.size]);
+
+  const handleToggleHighlight = useCallback((highlightId: string) => {
+    setSelectedHighlightIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(highlightId)) {
+        next.delete(highlightId);
+      } else {
+        next.add(highlightId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handlePreviewVideo = useCallback(
+    (v: UploadedVideo) => {
+      setPreviewDialog({
+        video: v,
+        clipStart: null,
+        clipEnd: null,
+        clipTitle: null,
+        clipSrc: null,
+      });
+      onPreview?.(v);
+    },
+    [onPreview],
+  );
+
+  const handlePreviewClip = useCallback((v: UploadedVideo, clip: Highlight) => {
+    const score = clip.metadata?.score as number | undefined;
+    const baseType = clip.type.replace(/_/g, " ");
+    let title = baseType;
+    if (clip.type === "MADE_BASKET" && score) {
+      title = `${score}PT Made Basket`;
+    } else if (score === 3) {
+      title = `3-pointer · ${baseType}`;
+    }
+    setPreviewDialog({
+      video: v,
+      clipStart: clip.startTime,
+      clipEnd: clip.endTime,
+      clipTitle: `${title} · ${clip.id.slice(-6)}`,
+      clipSrc: clip.clipUrl ?? null,
+    });
+  }, []);
+
+  const handleRemoveClip = useCallback((_v: UploadedVideo, clip: Highlight) => {
+    setDeletedHighlightIds((prev) => {
+      const next = new Set(prev);
+      next.add(clip.id);
+      return next;
+    });
+    setSelectedHighlightIds((prev) => {
+      if (!prev.has(clip.id)) return prev;
+      const next = new Set(prev);
+      next.delete(clip.id);
+      return next;
+    });
+  }, []);
+
+  const pollExportUntilReady = useCallback(async (exportId: string) => {
+    const sleep = (ms: number) =>
+      new Promise((res) => {
+        exportPollTimerRef.current = setTimeout(res, ms);
+      });
+
+    try {
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const { export: record, downloadUrl } =
+          await exports_.getExport(exportId);
+        if (record.status === "EXPORTED" && downloadUrl) {
+          const filename = `highlight-export-${exportId.slice(-6)}.mp4`;
+          try {
+            const resp = await fetch(downloadUrl, { mode: "cors" });
+            if (resp.ok) {
+              const blob = await resp.blob();
+              const blobUrl = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = blobUrl;
+              a.download = filename;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+              setExporting(false);
+              return;
+            }
+          } catch {
+            /* fallthrough: CORS 等失败时兜底直接 <a download> */
+          }
+          const a = document.createElement("a");
+          a.href = downloadUrl;
+          a.download = filename;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setExporting(false);
+          return;
+        }
+        if ((record.status as string) === "FAILED") {
+          setExporting(false);
+          return;
+        }
+        await sleep(1000);
+      }
+      setExporting(false);
+    } catch (_e) {
+      setExporting(false);
+    }
+  }, []);
+
+  const handleExport = useCallback(async () => {
+    const ids = Array.from(selectedHighlightIds).filter(
+      (id) => !deletedHighlightIds.has(id),
+    );
+    if (ids.length === 0) return;
+    try {
+      setExporting(true);
+      const { export: created } = await exports_.createExport({
+        projectId: DEFAULT_PROJECT_ID,
+        type: "MERGE",
+        format: "MP4_FULL_HD",
+        highlightIds: ids as [string, ...string[]],
+      });
+      if (exportPollTimerRef.current) {
+        clearTimeout(exportPollTimerRef.current);
+      }
+      exportPollTimerRef.current = setTimeout(() => {
+        pollExportUntilReady(created.id);
+      }, 800);
+    } catch (_e) {
+      setExporting(false);
+    }
+  }, [selectedHighlightIds, deletedHighlightIds, pollExportUntilReady]);
 
   const hasVideos = videos.length > 0;
 
@@ -313,14 +545,20 @@ export function VideoUploader({
 
       <UploadQueue
         videos={videos}
-        onPreview={(v) => onPreview?.(v)}
-        onRemove={handleRemove}
+        onPreviewClip={handlePreviewClip}
+        onRemoveClip={handleRemoveClip}
         onClearAll={handleClearAll}
+        selectionEnabled={selectionEnabled}
+        selectedHighlightIds={selectedHighlightIds}
+        deletedHighlightIds={deletedHighlightIds}
+        totalHighlightCount={totalHighlightCount}
+        exporting={exporting}
+        onToggleSelectionMode={handleToggleSelectionMode}
+        onToggleSelectAll={handleToggleSelectAll}
+        onToggleHighlight={handleToggleHighlight}
+        onExport={handleExport}
       />
       <UploadWorkflowDialog
-        /* 🔑 keyed remount：activeVideo 变（新视频打开 / 同一个重开）就卸载重装，
-           内部 stage/uploadPct/error/sessionVideoId 全部自动回到 initial value，
-           不需要在 Dialog 里写 setState-in-effect 做 reset，React 官方推荐。 */
         key={activeVideo?.id ?? "empty"}
         open={dialogOpen}
         video={activeVideo}
@@ -329,6 +567,22 @@ export function VideoUploader({
         onUploadComplete={handleOnUploadComplete}
         onProcessingStarted={handleOnProcessingStarted}
         onCancelled={handleOnCancelled}
+      />
+      <VideoPreviewDialog
+        video={previewDialog.video}
+        clipStartSec={previewDialog.clipStart}
+        clipEndSec={previewDialog.clipEnd}
+        clipTitle={previewDialog.clipTitle}
+        clipSrc={previewDialog.clipSrc}
+        onClose={() =>
+          setPreviewDialog({
+            video: null,
+            clipStart: null,
+            clipEnd: null,
+            clipTitle: null,
+            clipSrc: null,
+          })
+        }
       />
     </div>
   );

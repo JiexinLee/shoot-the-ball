@@ -4,6 +4,9 @@ import { z } from "zod";
 import { prisma } from "../../db/prisma";
 import { requireAuth } from "../auth/auth.middleware";
 import { enqueueExportJob } from "../../jobs/queue";
+import { createPresignedDownload } from "../../storage/object-storage";
+import { logger } from "../../config/logger";
+import { env } from "../../config/env";
 
 export const exportsRouter = Router();
 exportsRouter.use(requireAuth);
@@ -14,6 +17,68 @@ const createExportSchema = z.object({
   format: z.enum(["MP4_HD", "MP4_FULL_HD", "MP4_4K"]).default("MP4_FULL_HD"),
   highlightIds: z.array(z.string().min(1)).nonempty(),
 });
+
+async function runMockExportConsumer(exportId: string) {
+  try {
+    const record = await prisma.export.findUnique({
+      where: { id: exportId },
+      include: { exportItems: true },
+    });
+    if (!record) return;
+
+    setTimeout(async () => {
+      try {
+        await prisma.export.update({
+          where: { id: exportId },
+          data: { status: "EXPORTING" as const, startedAt: new Date() },
+        });
+      } catch {
+        /* ignore */
+      }
+    }, 700);
+
+    setTimeout(async () => {
+      try {
+        let placeholderStorageKey: string | null = null;
+        const firstItem = record.exportItems[0];
+        if (firstItem) {
+          const hl = await prisma.highlight.findUnique({
+            where: { id: firstItem.highlightId },
+            select: {
+              video: { select: { storageKey: true } },
+            },
+          });
+          placeholderStorageKey = hl?.video?.storageKey ?? null;
+        }
+
+        if (placeholderStorageKey) {
+          await prisma.export.update({
+            where: { id: exportId },
+            data: {
+              status: "EXPORTED" as const,
+              storageKey: placeholderStorageKey,
+              sizeBytes: BigInt(1),
+              completedAt: new Date(),
+            },
+          });
+          logger.info(
+            { exportId, mock: true, storageKey: placeholderStorageKey },
+            "exports.mock_consumer_finished: wrote EXPORTED placeholder",
+          );
+        } else {
+          await prisma.export.update({
+            where: { id: exportId },
+            data: { status: "EXPORTED" as const },
+          });
+        }
+      } catch (e) {
+        logger.error({ exportId, err: e }, "exports.mock_consumer_failed");
+      }
+    }, 2200);
+  } catch (e) {
+    logger.error({ exportId, err: e }, "exports.mock_consumer_setup_failed");
+  }
+}
 
 exportsRouter.post("/", async (req: Request, res: Response) => {
   const userId = req.currentUser!.id;
@@ -80,8 +145,15 @@ exportsRouter.post("/", async (req: Request, res: Response) => {
       projectId,
       userId,
     });
-  } catch {
-    // queue 关闭是 enqueueExportJob 内部自己做的
+  } catch (e) {
+    logger.warn(
+      { exportId: exportRecord.id, err: e },
+      "exports.enqueue_failed: queue unavailable, mock consumer will still run",
+    );
+  }
+
+  if (env.DEV_MOCK_PROCESSING || env.APP_ENV === "development") {
+    void runMockExportConsumer(exportRecord.id);
   }
 
   res.status(202).json({ export: exportRecord });
@@ -103,7 +175,19 @@ exportsRouter.get("/:id", async (req: Request, res: Response) => {
 
   let downloadUrl: string | null = null;
   if (exportRecord.status === "EXPORTED" && exportRecord.storageKey) {
-    downloadUrl = `https://storage.example.com/presigned-download/${exportRecord.storageKey}`;
+    try {
+      const signed = await createPresignedDownload(
+        "source",
+        exportRecord.storageKey,
+      );
+      downloadUrl = signed.url;
+    } catch (e) {
+      logger.warn(
+        { exportId: id, err: e },
+        "exports.get: createPresignedDownload failed, returning null url",
+      );
+      downloadUrl = null;
+    }
   }
 
   res.status(200).json({ export: exportRecord, downloadUrl });

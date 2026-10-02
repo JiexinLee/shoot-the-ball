@@ -51,9 +51,25 @@ export const videos = {
       downloadUrl?: string | null;
     }>(`/videos/${videoId}`),
 
-  /** GET /videos/:id/highlights — Review 页面拉 highlights 列表（eventTime 升序） */
-  listHighlights: (videoId: string) =>
-    http.get<{ highlights: Highlight[] }>(`/videos/${videoId}/highlights`),
+  /** GET /videos/:id/highlights — Review 页面拉 highlights 列表（eventTime 升序）
+   *  可选 durationHint: 前端本地 probe 到的视频真实秒数，DEV mock 生成 highlights 时如果 DB Video.duration 为空，
+   *  就用这个 hint 作为时长基准，防止 fallback=20 把 clips 挤在前 17s。
+   */
+  listHighlights: (videoId: string, opts?: { durationHint?: number }) => {
+    const qs = new URLSearchParams();
+    if (
+      typeof opts?.durationHint === "number" &&
+      Number.isFinite(opts.durationHint) &&
+      opts.durationHint > 0
+    ) {
+      qs.set("durationHint", String(opts.durationHint));
+    }
+    const qsStr = qs.toString();
+    const url = qsStr
+      ? `/videos/${videoId}/highlights?${qsStr}`
+      : `/videos/${videoId}/highlights`;
+    return http.get<{ highlights: Highlight[] }>(url);
+  },
 };
 
 export type {
