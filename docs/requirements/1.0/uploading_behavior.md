@@ -1,6 +1,6 @@
 # 视频上传 → 校准 → AI 分析 → SSE 进度推送：完整行为规范
 
-> **文档版本**：1.1 (MVP Phase, updated 2026-10-01)  
+> **文档版本**：1.2 (MVP Phase, updated 2026-10-02)  
 > **适用模块**：`apps/web` (Next.js 前端) ↔ `services/api` (Node.js 后端) ↔ `services/ai-worker` (Python 推理服务) ↔ Cloudflare R2 ↔ Redis  
 > **Hard Constraints（方向性永久约束，用户已明确决策）**：
 >
@@ -220,7 +220,135 @@ cd services/api && pnpm db:studio
 
 ---
 
-## 7. 端到端自检命令集（每次 commit 前跑一遍）
+## 7. MVP 阶段最新已落地能力（2026-10-02 snapshot：现阶段功能先完成）
+
+> 本节是 1.1→1.2 新增，用于记录"现阶段功能先完成"的最新状态，作为 docs 快照。等 ai-worker 接入后再更新成真实链路。
+
+### 7.1 Highlights 链路：真裁剪 clip（不再前端 Media Fragment） + Mock 随机性 + ai-worker 注释
+
+**用户最高优先级硬约束（永久不动）**：`services/api/src/modules/videos/services/highlights.service.ts` **L125-L132** 的 `rawDuration / pre / post / fallback` 赋值行 **100% 保持不动**。
+
+#### 7.1.1 durationHint 链路（老视频 DB duration=NULL 时按真实 duration spread）
+
+- **为什么**：老上传记录 DB `Video.duration` 列仍为 NULL → mock highlights 按 fallback 算会让 17s 视频出现 00:41+ 的假时间。
+- **方案（Wrapper Input Pattern，零侵入 L125-132）**：
+  - 前端 `GET /v1/videos/:id/highlights?durationHint=<probe durationSec>`
+  - 后端 `getVideoHighlightsById` 解析 query.durationHint Number Zod 校验后传 service
+  - service 在调用 mock 生成前**浅拷贝 video 对象**：当 DB duration 为空时，把 duration 设为 hint 再传下去
+  - 业务层 rawDuration 自动读到真值，L125-132 一行不动
+
+#### 7.1.2 Mock Highlights 改为 Math.random 三段不重叠
+
+- **JSDoc comment**：`maybeGenerateAndSaveMockHighlights` 顶部写了说明，未来 **ai-worker** 会用真实 YOLO / 事件 / 动作识别（进球/三分/助攻/抢断/盖帽）写 highlight，当前 mock 逻辑到时会被替换下线。
+- **三段式 slot（永不重叠）**：
+  - slot1 = `pickBetween(0.08, 0.40, pre+0.3, duration*0.40)`
+  - slot2 = `pickBetween(0.42, 0.70, duration*0.42, duration*0.70)`
+  - slot3 = duration 够长时启用 `pickBetween(0.72, 0.96, duration*0.72, maxEventTime)`
+  - `pickBetween` 内部 ratio + abs 双 clamp，`hi<=lo` 时取中点，处理短到 2-5s 视频边界不产生 NaN
+- **其它随机字段**：score 35% 三分 / team 50% HOME / confidence 0.75–0.95
+
+#### 7.1.3 Clip 真裁剪（ffmpeg -c copy，不重编码）
+
+- **触发点**：GET highlights 时对每条 `clipStorageKey` 为空的 highlight 串行跑 `ensureClipArtifactsForHighlights` → `trimAndUploadClip`
+  （失败不抛，catch log，下一次 GET 再重试）
+- **流程**：`clip-trimmer.ts`
+  1. presigned GET 从 source bucket 下载源视频到本地 /tmp
+  2. `spawn ffmpeg -ss <start> -i <src> -t <duration> -c copy -movflags +faststart -avoid_negative_ts make_zero <out>`
+     - `-c copy` 不重编码，速度飞快
+     - `-movflags +faststart` 让浏览器可以渐进播放，不用下完整个 clip 才开始播
+     - `-avoid_negative_ts make_zero` clip 时间戳从 0 开始，否则 seek 会跳到负时间
+  3. `object-storage.putObject("exports", "clips/<videoId>/<hlId>.mp4", buffer)` 写 R2 exports bucket
+  4. prisma.highlight.update 写回 `clipStorageKey`
+- **Web 播放器优先级**：卡片 `<video>` / Preview Dialog 都优先读 `h.clipUrl`（GET highlights 返回时后端用 exports bucket 动态 presign 的短 MP4 URL），进度条显示 clip 自己的短时长（比如 0:04/0:04），不再显示 0:17/0:17 全视频；末尾自动 seek 0 循环播放；fallback 保留旧 timeupdate clamp 方案。
+
+### 7.2 Export 链路：按选中 clip 导出短片段（不是全视频）
+
+**MVP 架构不变**：POST 入队 → setTimeout 假消费端 → GET presigned URL → 前端 poll 后自动触发浏览器下载。
+
+#### 7.2.1 runMockExportConsumer：storageKey 直接指向 clipStorageKey
+
+```
+QUEUED →(700ms)→ EXPORTING →(2200ms)→ EXPORTED
+写 EXPORTED 时：
+1. 读 POST 选中的所有 highlights → findMany(select {id, clipStorageKey})
+2. 优先取第一条有 clipStorageKey 的（真裁剪好的 clips/<videoId>/<hlId>.mp4）
+3. 全部没裁剪才 fallback highlight.video.storageKey（完整源视频）
+4. 多条 MERGE MVP 先取第 1 条 clip 占位，让 UI 下载到 4s 短文件闭环
+   （注释标注了未来真实 worker 会用 ffmpeg concat demuxer 真拼成一个长 MP4）
+5. 桶 hint 存进 Export.downloadUrl 字段（JSON.stringify {storageBucket:"EXPORTS"|"SOURCE", mock:true}）
+   → 不引入 Prisma migration，省 DB push 同步风险
+```
+
+#### 7.2.2 GET /exports/:id presign 正确桶（clips/ → exports bucket，防 403）
+
+```
+双重兜底判断（不依赖 metadata 存 DB 成功与否）：
+1. 先 try JSON.parse(exportRecord.downloadUrl) 读 storageBucket 字段
+   如果是 "EXPORTS" → presign exports bucket；如果是 "SOURCE" → source
+2. 如果 downloadUrl 为空或不是合法 JSON，直接按 storageKey 前缀：
+   key.startsWith("clips/") || key.startsWith("exports/") → presign exports bucket
+   其他情况 → presign source bucket
+```
+
+**为什么必须做这个**：clips/<..>.mp4 放在 exports bucket；如果 GET exports 硬写 source bucket presign，URL 会 403 Forbidden。
+
+#### 7.2.3 前端 Export 强制下载（fetch blob → <a download>）
+
+- 不走 `window.location.href = downloadUrl`（因为 presign URL 的 Content-Disposition 是 inline，浏览器会直接播不下载）
+- 改为 `fetch(downloadUrl) → res.blob() → URL.createObjectURL(blob) → <a download="<safeFilename>.mp4"> 自动 click → revokeObjectURL`
+- poll 用 30 次 for 循环 `await sleep(800ms)`（不用递归自引用的 async function）
+
+### 7.3 UI 层：Clip Preview/Delete 独立 + Loader 空态 + Header 去大按钮
+
+#### 7.3.1 UploadQueue Header 删 Preview/Delete 大按钮
+
+- 原来 filename 右边两个 Play/Trash 大按钮整个块删掉；UploadQueueProps onPreview/onRemove 两个 props 一起清理掉
+- header 只剩：左侧 filename + 状态 / 右侧 `Select · Select All · Clear All · Export N` 操作栏
+
+#### 7.3.2 每张 ClipCard 自己的 Preview / Delete
+
+- **Preview**：点击 → VideoPreviewDialog 新增 `clipSrc?: string|null` 字段，优先传 `clip.clipUrl`（真短 clip）
+  - Dialog 内部 `effectiveSrc = clipSrc ?? video.previewUrl`；`isTrimmedClip = Boolean(clipSrc)`
+  - isTrimmedClip 分支：末尾 `currentTime >= duration - 0.05` seek 0 循环播；fallback 保留全视频 timeupdate clamp
+- **Delete**：前端维护 `deletedHighlightIds: Set<string>`（不软删 DB highlight，本次工作区不参与）
+  - UploadQueue 循环 clips flatMap 时过滤 `if (deleted.has(c.id)) continue`
+  - Delete 同步把该 id 从 `selectedHighlightIds` Set 删掉
+  - total count / Select All / Export 请求 body highlightIds 四处全部排除 deleted
+
+#### 7.3.3 UploadQueue Loading 空态：黄色 Loader2 + 文案
+
+- `clips.length === 0` 的空态（还在 processing / trim clip 中）不再只显示一行纯文字
+- 换成 Lucide `<Loader2>` 图标：
+  - `h-8 w-8 text-[var(--primary)] animate-spin`
+  - `drop-shadow-[0_0_8px_rgba(250,204,21,0.4)]` 黄色光晕和 muted text 拉开颜色区别
+  - strokeWidth 2.25 粗线条，转起来不糊
+- 下面一行保留 `Processing highlights… check back shortly.` 文案
+
+### 7.4 现阶段（MVP Snapshot）完整验收步骤（60s 能走完）
+
+```
+前提：DEV_MOCK_STORAGE=false(真R2) / DEV_MOCK_PROCESSING=true / docker postgres+redis up
+```
+
+1. 拖一个测试 MP4 → Upload 0→100 → Calibrate 点两下画 hoopRoi → Save + Start AI
+2. SSE 推 completed → 卡片绿 ✅ Ready，下方出现 3 张 ClipCard
+3. **验证 Mock 随机**：Chrome 刷新一次 Workspace，再看 3 张卡片的时间区间（比如 slot1 第一次 8s-12s，第二次可能 11s-15s），两次不一样
+4. 任点一张卡片右下角 **Preview** → Dialog 进度条显示 clip 自己短时长（比如 0:04/0:04）不是全视频 43s
+5. **Delete** 第 2 张 → grid 剩 2 张；Select All → 显示 2/2（不是 3/3）
+6. 勾选第 1 张 → 点 **Export 1** → Network：
+   - POST /v1/exports 202 Created → body 有 exportId
+   - 之后 ~30 次 GET /v1/exports/:id 轮询
+   - 最后一次 GET status=EXPORTED，downloadUrl 是 exports bucket presign URL
+   - 浏览器**自动下载** mp4；QuickTime Inspector 看 duration≈4s（不是源视频 17/43s）
+7. **双侧编译**：
+   ```bash
+   pnpm --filter @shoot-the-ball/api exec tsc --noEmit   # exit 0
+   pnpm --filter @shoot-the-ball/web exec tsc --noEmit   # exit 0
+   ```
+
+---
+
+## 8. 端到端自检命令集（每次 commit 前跑一遍）
 
 ```bash
 # 1. 共享包编译（前后端类型契约必须一致）

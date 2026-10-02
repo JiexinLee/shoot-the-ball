@@ -15,7 +15,7 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "./StatusBadge";
 import { formatBytes, formatDuration } from "@/lib/format";
-import type { UploadedVideo } from "@/lib/types";
+import { formatHighlightType, type UploadedVideo } from "@/lib/types";
 import type { Highlight } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -321,7 +321,7 @@ export function HighlightClipPlayer({
             {formatDuration(start)} – {formatDuration(end)}
           </span>
           <span className="text-[var(--foreground)]">
-            · {h.type.replace(/_/g, " ")}
+            · {formatHighlightType(h?.type, score)}
           </span>
           {score && (
             <Badge

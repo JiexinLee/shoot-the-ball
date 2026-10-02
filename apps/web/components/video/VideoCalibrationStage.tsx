@@ -92,7 +92,20 @@ export function VideoCalibrationStage({
     h: number;
   } | null>(null);
 
-  /* —— 统一的 seek 工具：paused 时强制触发解码渲染，避免 set currentTime 画面不动 —— */
+  /* —— 统一的 seek 工具：校准阶段视频默认保持 paused，只由滑块控制时间，绝不自动播放。
+     先强制 pause() 防任何情况下留在 playing，再 set currentTime；
+     如果浏览器 paused 时只改 currentTime 不渲染画面（Safari/部分 Chrome），
+     用一次 muted play→pause 的单帧刷新 trick，所有出口 100% 再调一次 forcePause()
+     保证不残留 playing 状态。 */
+  const seekSafetyTimersRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    const timers = seekSafetyTimersRef.current;
+    return () => {
+      timers.forEach((t) => window.clearTimeout(t));
+      timers.clear();
+    };
+  }, []);
+
   const seekVideoTo = useCallback(
     (targetSec: number) => {
       const v = videoRef.current;
@@ -102,46 +115,73 @@ export function VideoCalibrationStage({
           ? v.duration
           : realDuration;
       const clamped = Math.max(0, Math.min(maxDur, targetSec));
-      const wasPaused = v.paused || v.ended;
       const wasMuted = v.muted;
-      try {
-        v.currentTime = clamped;
-        if (wasPaused) {
-          v.muted = true;
-          const p = v.play();
-          if (p && typeof (p as Promise<void>).then === "function") {
-            (p as Promise<void>)
-              .then(() => {
-                try {
-                  v.pause();
-                  v.muted = wasMuted;
-                  setCurrentTimeSec(v.currentTime);
-                } catch {
-                  /* ignore */
-                }
-              })
-              .catch(() => {
-                try {
-                  v.muted = wasMuted;
-                  setCurrentTimeSec(v.currentTime);
-                } catch {
-                  /* ignore */
-                }
-              });
-          } else {
-            try {
-              v.pause();
-              v.muted = wasMuted;
-            } catch {
-              /* ignore */
-            }
-            setCurrentTimeSec(clamped);
-          }
-        } else {
-          setCurrentTimeSec(clamped);
+
+      const forcePause = () => {
+        try {
+          if (!v.paused) v.pause();
+        } catch {
+          /* ignore */
         }
+        try {
+          v.muted = wasMuted;
+        } catch {
+          /* ignore */
+        }
+        try {
+          setCurrentTimeSec(v.currentTime);
+        } catch {
+          /* ignore */
+        }
+      };
+
+      try {
+        try {
+          v.pause();
+        } catch {
+          /* ignore */
+        }
+        v.currentTime = clamped;
+        setCurrentTimeSec(clamped);
+
+        let safetyTimer: number | null = null;
+        const clearSafety = () => {
+          if (safetyTimer != null) {
+            window.clearTimeout(safetyTimer);
+            seekSafetyTimersRef.current.delete(safetyTimer);
+            safetyTimer = null;
+          }
+        };
+        const wrapped = () => {
+          clearSafety();
+          try {
+            const p = (() => {
+              try {
+                if (!v.muted) v.muted = true;
+                return v.play();
+              } catch {
+                return null;
+              }
+            })();
+            if (p && typeof (p as Promise<void>).then === "function") {
+              (p as Promise<void>)
+                .then(() => forcePause())
+                .catch(() => forcePause());
+            } else {
+              forcePause();
+            }
+          } catch {
+            forcePause();
+          }
+        };
+        v.addEventListener("seeked", wrapped, { once: true });
+        safetyTimer = window.setTimeout(() => {
+          safetyTimer = null;
+          forcePause();
+        }, 600);
+        seekSafetyTimersRef.current.add(safetyTimer);
       } catch {
-        /* ignore */
+        forcePause();
       }
     },
     [realDuration],
@@ -201,7 +241,7 @@ export function VideoCalibrationStage({
   const nw = naturalWidth ?? 1920;
   const nh = naturalHeight ?? 1080;
 
-  /* ----- 视频加载完毕：记录真实时长 + seek 到 defaultSeekSec or 30% ----- */
+  /* ----- 视频加载完毕：记录真实时长 + seek 到 defaultSeekSec or 30% + 强制保持 paused ----- */
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -213,14 +253,32 @@ export function VideoCalibrationStage({
           Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 1;
         setRealDuration(trueDur);
         seekVideoTo(targetSec(trueDur));
+        // —— 防自动播放（关键）：loadedmetadata 之后永远再调一次 v.pause()
+        try {
+          if (!v.paused) v.pause();
+        } catch {
+          /* ignore */
+        }
         setIsReady(true);
         recomputeRenderRect();
       } catch {
         /* ignore */
       }
     };
+    const onPlay = () => {
+      // —— 最终保险：如果任何情况（浏览器策略/用户误点）进入 playing，立刻拉回 paused
+      try {
+        v.pause();
+      } catch {
+        /* ignore */
+      }
+    };
     v.addEventListener("loadedmetadata", onMeta);
-    return () => v.removeEventListener("loadedmetadata", onMeta);
+    v.addEventListener("play", onPlay);
+    return () => {
+      v.removeEventListener("loadedmetadata", onMeta);
+      v.removeEventListener("play", onPlay);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewUrl, defaultSeekSec, recomputeRenderRect]);
 
@@ -519,6 +577,7 @@ export function VideoCalibrationStage({
             playsInline
             preload="auto"
             controls={false}
+            autoPlay={false}
             onTimeUpdate={handleTimeUpdate}
             className="h-full w-full object-contain cursor-crosshair"
           />

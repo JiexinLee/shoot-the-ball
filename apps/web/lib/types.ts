@@ -70,7 +70,30 @@ export type JobStatus =
   | "FAILED";
 
 export type HighlightType =
-  "MADE_BASKET" | "ASSIST" | "STEAL" | "BLOCK" | "OTHER";
+  "MADE_BASKET" | "THREE_POINTER" | "ASSIST" | "STEAL" | "BLOCK" | "OTHER";
+
+export function formatHighlightType(
+  t: HighlightType | null | undefined,
+  scoreOverride?: number | null,
+): string {
+  if (!t) return "Play";
+  switch (t) {
+    case "MADE_BASKET":
+      return scoreOverride === 3 ? "3PT Field Goal" : "2PT Field Goal";
+    case "THREE_POINTER":
+      return "3PT Field Goal";
+    case "ASSIST":
+      return "Assist";
+    case "STEAL":
+      return "Steal";
+    case "BLOCK":
+      return "Block";
+    case "OTHER":
+      return "Key Play";
+    default:
+      return String(t).replace(/_/g, " ");
+  }
+}
 
 export type HighlightUserStatus = "PENDING" | "SELECTED" | "DELETED";
 

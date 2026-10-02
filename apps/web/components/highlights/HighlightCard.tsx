@@ -1,6 +1,6 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { formatConfidence } from "@/lib/format";
-import type { Highlight } from "@/lib/types";
+import { formatHighlightType, type Highlight } from "@/lib/types";
 
 interface HighlightCardProps {
   highlight: Highlight;
@@ -27,7 +27,7 @@ export function HighlightCard({ highlight }: HighlightCardProps) {
       <CardContent className="p-3 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-[var(--primary)]">
-            {highlight.type.replace("_", " ")}
+            {formatHighlightType(highlight.type)}
           </span>
           <span className="text-xs text-[var(--muted-foreground)] tabular-nums">
             conf: {formatConfidence(highlight.confidence)}

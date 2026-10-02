@@ -39,30 +39,67 @@ async function runMockExportConsumer(exportId: string) {
 
     setTimeout(async () => {
       try {
-        let placeholderStorageKey: string | null = null;
-        const firstItem = record.exportItems[0];
-        if (firstItem) {
-          const hl = await prisma.highlight.findUnique({
+        // 如果每条 highlight 已经有真裁剪好的 clipStorageKey（exports bucket 下的短 MP4），
+        // Export 的成品直接优先用短 clip：
+        //   - 选 1 条 → storageKey = 这条 highlight 的 clipStorageKey
+        //   - 选 N 条(MERGE) → MVP 先拿第 1 条 highlight 的 clipStorageKey 占位（UI 可以下载一个 4 秒短文件闭环）
+        //     未来真实 worker 会用 ffmpeg concat 把 N 段真拼接成一个再 upload exports bucket
+        const allHighlights = await prisma.highlight.findMany({
+          where: {
+            id: { in: record.exportItems.map((i) => i.highlightId) },
+          },
+          select: { id: true, clipStorageKey: true },
+        });
+        const firstWithClip = allHighlights.find(
+          (h) =>
+            typeof h.clipStorageKey === "string" && h.clipStorageKey.length > 0,
+        );
+        let finalStorageKey: string | null =
+          firstWithClip?.clipStorageKey ?? null;
+        // 如果全部都还没裁剪（比如 highlight 生成和 trim 都还没完成），兜底用源视频 storageKey
+        if (!finalStorageKey && record.exportItems.length > 0) {
+          const firstItem = record.exportItems[0];
+          if (!firstItem) return;
+          const first = await prisma.highlight.findUnique({
             where: { id: firstItem.highlightId },
-            select: {
-              video: { select: { storageKey: true } },
-            },
+            select: { video: { select: { storageKey: true } } },
           });
-          placeholderStorageKey = hl?.video?.storageKey ?? null;
+          const key = first?.video?.storageKey;
+          finalStorageKey =
+            typeof key === "string" && key.length > 0 ? key : null;
         }
 
-        if (placeholderStorageKey) {
+        if (finalStorageKey) {
+          // 是否是 exports bucket 下的成品 key（clips/<videoId>/<hlId>.mp4 或未来 <exportId>/merged.mp4）
+          const isExportsBucket =
+            finalStorageKey.startsWith("clips/") ||
+            finalStorageKey.startsWith("exports/");
+          const storageBucket = isExportsBucket ? "EXPORTS" : "SOURCE";
+          // 不引入 DB migration，把存储桶 hint 直接编码在 downloadUrlPrefix（没用到）不行，
+          // 所以我们在 storageKey 前缀约定 + storageBucket 记录到 DB 的 downloadUrl 字段（JSON.stringify）
+          // 实际上：getExport 那边会根据 key 前缀 clips/ | exports/ 自动判断，这里写 EXPORTED + storageKey 就够了
           await prisma.export.update({
             where: { id: exportId },
             data: {
               status: "EXPORTED" as const,
-              storageKey: placeholderStorageKey,
+              storageKey: finalStorageKey,
+              // 复用 downloadUrl 字段存个 metadata JSON（真正 downloadUrl 会在 GET 时重新用 presigned 生成，不会读这个）
+              downloadUrl: JSON.stringify({
+                storageBucket,
+                mock: true,
+                createdAt: Date.now(),
+              }),
               sizeBytes: BigInt(1),
               completedAt: new Date(),
             },
           });
           logger.info(
-            { exportId, mock: true, storageKey: placeholderStorageKey },
+            {
+              exportId,
+              mock: true,
+              storageKey: finalStorageKey,
+              storageBucket,
+            },
             "exports.mock_consumer_finished: wrote EXPORTED placeholder",
           );
         } else {
@@ -167,7 +204,6 @@ exportsRouter.get("/:id", async (req: Request, res: Response) => {
     where: { id, userId },
     include: { exportItems: true },
   });
-
   if (!exportRecord) {
     res.status(404).json({ error: "Export not found" });
     return;
@@ -176,8 +212,30 @@ exportsRouter.get("/:id", async (req: Request, res: Response) => {
   let downloadUrl: string | null = null;
   if (exportRecord.status === "EXPORTED" && exportRecord.storageKey) {
     try {
+      // storageBucket 从 exportRecord.downloadUrl 里读（mock consumer 写了一个 JSON 存桶信息）
+      // 兜底：按 storageKey 前缀判断（clips/* / exports/* 默认 exports bucket，其它都是 source bucket）
+      const mdBucketStr = (() => {
+        const s = exportRecord.downloadUrl;
+        if (!s || !s.startsWith("{")) return null;
+        try {
+          const parsed = JSON.parse(s) as { storageBucket?: unknown };
+          return typeof parsed.storageBucket === "string"
+            ? parsed.storageBucket
+            : null;
+        } catch {
+          return null;
+        }
+      })();
+      const keyLooksExports =
+        exportRecord.storageKey.startsWith("clips/") ||
+        exportRecord.storageKey.startsWith("exports/");
+      const bucket: "source" | "exports" =
+        mdBucketStr?.toUpperCase() === "EXPORTS" ||
+        (!mdBucketStr && keyLooksExports)
+          ? "exports"
+          : "source";
       const signed = await createPresignedDownload(
-        "source",
+        bucket,
         exportRecord.storageKey,
       );
       downloadUrl = signed.url;

@@ -13,7 +13,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { HighlightClipPlayer } from "./VideoCard";
-import type { UploadedVideo, Highlight } from "@/lib/types";
+import {
+  formatHighlightType,
+  type UploadedVideo,
+  type Highlight,
+} from "@/lib/types";
 import { cn, formatBytes } from "@/lib/utils";
 
 interface UploadQueueProps {
@@ -197,9 +201,15 @@ export function UploadQueue({
         </div>
       ) : (
         <div className="w-full rounded-xl border border-dashed border-[var(--border)] bg-[var(--card)]/50 px-4 py-12 text-center">
-          <p className="text-sm text-[var(--muted-foreground)]">
-            Processing highlights… check back shortly.
-          </p>
+          <div className="flex flex-col items-center justify-center gap-3">
+            <Loader2
+              className="h-8 w-8 text-[var(--primary)] animate-spin drop-shadow-[0_0_8px_rgba(250,204,21,0.4)]"
+              strokeWidth={2.25}
+            />
+            <p className="text-sm text-[var(--muted-foreground)]">
+              Processing highlights… check back shortly.
+            </p>
+          </div>
         </div>
       )}
     </div>
@@ -254,7 +264,9 @@ function ClipCard({
             {formatClock(clip.startTime ?? 0)} –{" "}
             {formatClock(clip.endTime ?? 0)}
           </span>
-          <span className="text-xs font-semibold">· {clip.type}</span>
+          <span className="text-xs font-semibold">
+            · {formatHighlightType(clip.type, score ?? null)}
+          </span>
           {score != null && (
             <Badge
               variant="secondary"

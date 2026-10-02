@@ -6,7 +6,11 @@ import { DropZone } from "./upload/DropZone";
 import { UploadQueue } from "./upload/UploadQueue";
 import { UploadWorkflowDialog } from "./UploadWorkflowDialog";
 import { VideoPreviewDialog } from "./VideoPreviewDialog";
-import type { UploadedVideo, Highlight } from "@/lib/types";
+import {
+  formatHighlightType,
+  type UploadedVideo,
+  type Highlight,
+} from "@/lib/types";
 import {
   generateUid,
   guessMime,
@@ -375,13 +379,7 @@ export function VideoUploader({
 
   const handlePreviewClip = useCallback((v: UploadedVideo, clip: Highlight) => {
     const score = clip.metadata?.score as number | undefined;
-    const baseType = clip.type.replace(/_/g, " ");
-    let title = baseType;
-    if (clip.type === "MADE_BASKET" && score) {
-      title = `${score}PT Made Basket`;
-    } else if (score === 3) {
-      title = `3-pointer · ${baseType}`;
-    }
+    const title = formatHighlightType(clip.type, score ?? null);
     setPreviewDialog({
       video: v,
       clipStart: clip.startTime,
@@ -405,82 +403,168 @@ export function VideoUploader({
     });
   }, []);
 
-  const pollExportUntilReady = useCallback(async (exportId: string) => {
-    const sleep = (ms: number) =>
-      new Promise((res) => {
-        exportPollTimerRef.current = setTimeout(res, ms);
-      });
-
-    try {
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        const { export: record, downloadUrl } =
-          await exports_.getExport(exportId);
-        if (record.status === "EXPORTED" && downloadUrl) {
-          const filename = `highlight-export-${exportId.slice(-6)}.mp4`;
-          try {
-            const resp = await fetch(downloadUrl, { mode: "cors" });
-            if (resp.ok) {
-              const blob = await resp.blob();
-              const blobUrl = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = blobUrl;
-              a.download = filename;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
-              setExporting(false);
-              return;
-            }
-          } catch {
-            /* fallthrough: CORS 等失败时兜底直接 <a download> */
+  const pollExportUntilReady = useCallback(
+    async (
+      exportId: string,
+      opts?: {
+        videoFilename?: string | null;
+        highlightIndex?: number;
+        totalCount?: number;
+        startTimeSec?: number | null;
+        endTimeSec?: number | null;
+      },
+    ) => {
+      const sleep = (ms: number) =>
+        new Promise<void>((res) => {
+          const t = setTimeout(() => {
+            exportPollTimerRef.current = null;
+            res();
+          }, ms);
+          if (exportPollTimerRef.current) {
+            /* 外部整体 cancel 时会统一 clearTimeout，这里不单独 clear，避免串行定时器互相打断 */
           }
-          const a = document.createElement("a");
-          a.href = downloadUrl;
-          a.download = filename;
-          a.target = "_blank";
-          a.rel = "noopener noreferrer";
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          setExporting(false);
-          return;
+          exportPollTimerRef.current = t;
+        });
+
+      const pad2 = (n: number) => n.toString().padStart(2, "0");
+      const formatTime = (s: number | null | undefined) => {
+        if (typeof s !== "number" || !Number.isFinite(s)) return "clip";
+        const sec = Math.max(0, Math.floor(s));
+        const m = Math.floor(sec / 60);
+        const ss = sec - m * 60;
+        return `${pad2(m)}m${pad2(ss)}s`;
+      };
+
+      const buildFilename = (): string => {
+        const base = (opts?.videoFilename ?? "highlight")
+          .replace(/\.[^.]+$/, "")
+          .replace(/[^\p{Letter}\p{Number}_\-]/gu, "_");
+        const idx =
+          typeof opts?.highlightIndex === "number" &&
+          typeof opts?.totalCount === "number"
+            ? `${opts.highlightIndex + 1}-of-${opts.totalCount}`
+            : `${exportId.slice(-6)}`;
+        const time = `${formatTime(opts?.startTimeSec)}-${formatTime(opts?.endTimeSec)}`;
+        return `${base}__${idx}__${time}.mp4`;
+      };
+
+      try {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const { export: record, downloadUrl } =
+            await exports_.getExport(exportId);
+          if (record.status === "EXPORTED" && downloadUrl) {
+            const filename = buildFilename();
+            try {
+              const resp = await fetch(downloadUrl, { mode: "cors" });
+              if (resp.ok) {
+                const blob = await resp.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = blobUrl;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+                return;
+              }
+            } catch {
+              /* fallthrough: CORS 等失败时兜底直接 <a download> */
+            }
+            const a = document.createElement("a");
+            a.href = downloadUrl;
+            a.download = filename;
+            a.target = "_blank";
+            a.rel = "noopener noreferrer";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            return;
+          }
+          if ((record.status as string) === "FAILED") {
+            return;
+          }
+          await sleep(800);
         }
-        if ((record.status as string) === "FAILED") {
-          setExporting(false);
-          return;
-        }
-        await sleep(1000);
+      } catch {
+        /* swallow */
       }
-      setExporting(false);
-    } catch (_e) {
-      setExporting(false);
-    }
-  }, []);
+    },
+    [],
+  );
 
   const handleExport = useCallback(async () => {
-    const ids = Array.from(selectedHighlightIds).filter(
+    const active = activeVideo;
+    const selectedIds = Array.from(selectedHighlightIds).filter(
       (id) => !deletedHighlightIds.has(id),
     );
-    if (ids.length === 0) return;
+    if (selectedIds.length === 0 || !active?.id) return;
+
+    const clipById = new Map<
+      string,
+      { startTime?: number | null; endTime?: number | null }
+    >();
+    for (const v of videos) {
+      const list = (v as { highlights?: unknown[] | null }).highlights ?? [];
+      for (const c of list) {
+        const cAny = c as {
+          id?: string;
+          startTime?: number | null;
+          startTimeSec?: number | null;
+          endTime?: number | null;
+          endTimeSec?: number | null;
+        };
+        if (!cAny.id) continue;
+        clipById.set(cAny.id, {
+          startTime: cAny.startTime ?? cAny.startTimeSec ?? null,
+          endTime: cAny.endTime ?? cAny.endTimeSec ?? null,
+        });
+      }
+    }
+
+    const safeFilename =
+      (active as unknown as { name?: string }).name ??
+      (active as unknown as { filename?: string }).filename ??
+      "highlight";
+
     try {
       setExporting(true);
-      const { export: created } = await exports_.createExport({
-        projectId: DEFAULT_PROJECT_ID,
-        type: "MERGE",
-        format: "MP4_FULL_HD",
-        highlightIds: ids as [string, ...string[]],
-      });
       if (exportPollTimerRef.current) {
         clearTimeout(exportPollTimerRef.current);
+        exportPollTimerRef.current = null;
       }
-      exportPollTimerRef.current = setTimeout(() => {
-        pollExportUntilReady(created.id);
-      }, 800);
-    } catch (_e) {
+
+      const total = selectedIds.length;
+      await Promise.all(
+        selectedIds.map(async (hlId, idx) => {
+          const { export: created } = await exports_.createExport({
+            projectId: DEFAULT_PROJECT_ID,
+            type: "INDIVIDUAL",
+            format: "MP4_FULL_HD",
+            highlightIds: [hlId],
+          });
+          const meta = clipById.get(hlId);
+          return pollExportUntilReady(created.id, {
+            videoFilename: safeFilename,
+            highlightIndex: idx,
+            totalCount: total,
+            startTimeSec: meta?.startTime ?? null,
+            endTimeSec: meta?.endTime ?? null,
+          });
+        }),
+      );
+    } catch {
+      /* swallow */
+    } finally {
       setExporting(false);
     }
-  }, [selectedHighlightIds, deletedHighlightIds, pollExportUntilReady]);
+  }, [
+    selectedHighlightIds,
+    deletedHighlightIds,
+    pollExportUntilReady,
+    activeVideo,
+    videos,
+  ]);
 
   const hasVideos = videos.length > 0;
 

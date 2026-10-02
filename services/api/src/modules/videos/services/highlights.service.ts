@@ -99,7 +99,12 @@ type MockableVideo = {
 };
 
 /**
- * 私有工具方法：根据 boolean flag 决定是否给「DB highlights 为空」的视频生成 2-3 条均匀切片假数据。
+ * [DEV/MOCK] 私有工具方法：根据 boolean flag 决定是否给视频生成 2-3 条随机位置的假进球切片。
+ *
+ *   本函数将来会被 **ai-worker** 替换：未来 ai-worker 跑完真实 YOLO / 事件 /
+ *   动作识别（进球/三分/助攻/抢断/盖帽），把识别到的每一条真实 eventTime /
+ *   startTime / endTime / confidence / metadata 写进 highlights 表，到时候这里
+ *   的 mock 逻辑就不会再运行了。
  *
  *   本方法内部不读取任何 env 配置，开关完全由调用方传入的 useMock: boolean 控制。
  *   → 调用侧（例如 getVideoHighlights）可以根据 env / query 参数 / 业务规则自行计算 useMock。
@@ -144,31 +149,54 @@ async function maybeGenerateAndSaveMockHighlights(
     type: HighlightType;
   };
   const maxEventTime = Math.max(pre + 0.1, duration - post - 0.1);
-  const base: Omit<FakeEvent, "startTime" | "endTime">[] = [
-    {
-      eventTime: Math.min(maxEventTime, Math.max(pre + 0.2, duration * 0.25)),
-      score: 2,
-      teamSide: "HOME",
-      confidence: 0.9,
-      type: "MADE_BASKET",
-    },
-    {
-      eventTime: Math.min(maxEventTime, Math.max(pre + 0.5, duration * 0.55)),
-      score: 3,
-      teamSide: "HOME",
-      confidence: 0.85,
-      type: "THREE_POINTER",
-    },
-  ];
-  if (duration > minClipDuration * 3 + 2) {
-    base.push({
-      eventTime: Math.min(maxEventTime, Math.max(pre + 1, duration * 0.8)),
-      score: 2,
-      teamSide: "AWAY",
-      confidence: 0.78,
-      type: "MADE_BASKET",
-    });
+
+  // 3 个互不重叠的随机"进球点"：均匀分 3 段，每段内 Math.random()
+  // 避免以前固定系数 0.25/0.55/0.8 导致 3 条位置总一样
+  function pickBetween(
+    minRatio: number,
+    maxRatio: number,
+    minAbs: number,
+    maxAbs: number,
+  ): number {
+    const lo = Math.max(minAbs, pre + 0.2, duration * minRatio);
+    const hi = Math.min(maxAbs, maxEventTime, duration * maxRatio);
+    if (hi <= lo) return (lo + hi) / 2;
+    return lo + Math.random() * (hi - lo);
   }
+  const slot1 = pickBetween(0.08, 0.4, pre + 0.3, duration * 0.4);
+  const slot2 = pickBetween(0.42, 0.7, duration * 0.42, duration * 0.7);
+  const slot3Enabled = duration > minClipDuration * 3 + 2;
+  const slot3 = slot3Enabled
+    ? pickBetween(0.72, 0.96, duration * 0.72, maxEventTime)
+    : -1;
+
+  const scoreRoll = (): 2 | 3 => (Math.random() < 0.35 ? 3 : 2);
+  const teamRoll = (): "HOME" | "AWAY" =>
+    Math.random() < 0.5 ? "HOME" : "AWAY";
+  const conf = () => 0.75 + Math.random() * 0.2;
+
+  const buildBase = (
+    slot: number,
+    scoreOverride?: 2 | 3,
+    teamOverride?: "HOME" | "AWAY",
+  ): Omit<FakeEvent, "startTime" | "endTime"> => {
+    const score = scoreOverride ?? scoreRoll();
+    const teamSide = teamOverride ?? teamRoll();
+    return {
+      eventTime: slot,
+      score,
+      teamSide,
+      confidence: conf(),
+      type: score === 3 ? "THREE_POINTER" : "MADE_BASKET",
+    };
+  };
+
+  const base: Omit<FakeEvent, "startTime" | "endTime">[] = [
+    buildBase(slot1, 2, "HOME"),
+    buildBase(slot2),
+  ];
+  if (slot3Enabled) base.push(buildBase(slot3));
+
   const evList: FakeEvent[] = base
     .map((ev) => {
       const startTime = Math.max(0, ev.eventTime - pre);
