@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { DropZone } from "./upload/DropZone";
-import { UploadQueue } from "./upload/UploadQueue";
-import { UploadWorkflowDialog } from "./UploadWorkflowDialog";
-import { VideoPreviewDialog } from "./VideoPreviewDialog";
+import { PageHeader } from "@/components/shared";
+import { DropZone } from "../upload/DropZone";
+import { UploadQueue } from "../upload/UploadQueue";
+import { UploadWorkflowDialog } from "../upload-workflow/UploadWorkflowDialog";
+import { VideoPreviewDialog } from "../preview/VideoPreviewDialog";
 import {
   formatHighlightType,
   type UploadedVideo,
@@ -21,17 +22,17 @@ import {
 } from "@/lib/api-client";
 import { formatBytes } from "@/lib/format";
 import { videos as apiVideos } from "@/lib/api/videos";
-import { exports_ } from "@/lib/api/exports";
-import { DEFAULT_PROJECT_ID } from "@/lib/api/upload";
-import { PageHeader } from "@/components/shared";
+import { HeroSection } from "./components/HeroSection";
+import {
+  usePollExportUntilReady,
+  useExportHandler,
+} from "./hooks/useExportPipeline";
 
 export interface VideoUploaderProps {
   className?: string;
   onPreview?: (video: UploadedVideo) => void;
   onRemove?: (video: UploadedVideo) => void;
 }
-
-export type { UploadedVideo } from "@/lib/types";
 
 export function VideoUploader({
   className,
@@ -403,168 +404,19 @@ export function VideoUploader({
     });
   }, []);
 
-  const pollExportUntilReady = useCallback(
-    async (
-      exportId: string,
-      opts?: {
-        videoFilename?: string | null;
-        highlightIndex?: number;
-        totalCount?: number;
-        startTimeSec?: number | null;
-        endTimeSec?: number | null;
-      },
-    ) => {
-      const sleep = (ms: number) =>
-        new Promise<void>((res) => {
-          const t = setTimeout(() => {
-            exportPollTimerRef.current = null;
-            res();
-          }, ms);
-          if (exportPollTimerRef.current) {
-            /* 外部整体 cancel 时会统一 clearTimeout，这里不单独 clear，避免串行定时器互相打断 */
-          }
-          exportPollTimerRef.current = t;
-        });
+  const pollExportUntilReady = usePollExportUntilReady({
+    exportPollTimerRef,
+  });
 
-      const pad2 = (n: number) => n.toString().padStart(2, "0");
-      const formatTime = (s: number | null | undefined) => {
-        if (typeof s !== "number" || !Number.isFinite(s)) return "clip";
-        const sec = Math.max(0, Math.floor(s));
-        const m = Math.floor(sec / 60);
-        const ss = sec - m * 60;
-        return `${pad2(m)}m${pad2(ss)}s`;
-      };
-
-      const buildFilename = (): string => {
-        const base = (opts?.videoFilename ?? "highlight")
-          .replace(/\.[^.]+$/, "")
-          .replace(/[^\p{Letter}\p{Number}_\-]/gu, "_");
-        const idx =
-          typeof opts?.highlightIndex === "number" &&
-          typeof opts?.totalCount === "number"
-            ? `${opts.highlightIndex + 1}-of-${opts.totalCount}`
-            : `${exportId.slice(-6)}`;
-        const time = `${formatTime(opts?.startTimeSec)}-${formatTime(opts?.endTimeSec)}`;
-        return `${base}__${idx}__${time}.mp4`;
-      };
-
-      try {
-        for (let attempt = 0; attempt < 30; attempt += 1) {
-          const { export: record, downloadUrl } =
-            await exports_.getExport(exportId);
-          if (record.status === "EXPORTED" && downloadUrl) {
-            const filename = buildFilename();
-            try {
-              const resp = await fetch(downloadUrl, { mode: "cors" });
-              if (resp.ok) {
-                const blob = await resp.blob();
-                const blobUrl = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = blobUrl;
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
-                return;
-              }
-            } catch {
-              /* fallthrough: CORS 等失败时兜底直接 <a download> */
-            }
-            const a = document.createElement("a");
-            a.href = downloadUrl;
-            a.download = filename;
-            a.target = "_blank";
-            a.rel = "noopener noreferrer";
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            return;
-          }
-          if ((record.status as string) === "FAILED") {
-            return;
-          }
-          await sleep(800);
-        }
-      } catch {
-        /* swallow */
-      }
-    },
-    [],
-  );
-
-  const handleExport = useCallback(async () => {
-    const active = activeVideo;
-    const selectedIds = Array.from(selectedHighlightIds).filter(
-      (id) => !deletedHighlightIds.has(id),
-    );
-    if (selectedIds.length === 0 || !active?.id) return;
-
-    const clipById = new Map<
-      string,
-      { startTime?: number | null; endTime?: number | null }
-    >();
-    for (const v of videos) {
-      const list = (v as { highlights?: unknown[] | null }).highlights ?? [];
-      for (const c of list) {
-        const cAny = c as {
-          id?: string;
-          startTime?: number | null;
-          startTimeSec?: number | null;
-          endTime?: number | null;
-          endTimeSec?: number | null;
-        };
-        if (!cAny.id) continue;
-        clipById.set(cAny.id, {
-          startTime: cAny.startTime ?? cAny.startTimeSec ?? null,
-          endTime: cAny.endTime ?? cAny.endTimeSec ?? null,
-        });
-      }
-    }
-
-    const safeFilename =
-      (active as unknown as { name?: string }).name ??
-      (active as unknown as { filename?: string }).filename ??
-      "highlight";
-
-    try {
-      setExporting(true);
-      if (exportPollTimerRef.current) {
-        clearTimeout(exportPollTimerRef.current);
-        exportPollTimerRef.current = null;
-      }
-
-      const total = selectedIds.length;
-      await Promise.all(
-        selectedIds.map(async (hlId, idx) => {
-          const { export: created } = await exports_.createExport({
-            projectId: DEFAULT_PROJECT_ID,
-            type: "INDIVIDUAL",
-            format: "MP4_FULL_HD",
-            highlightIds: [hlId],
-          });
-          const meta = clipById.get(hlId);
-          return pollExportUntilReady(created.id, {
-            videoFilename: safeFilename,
-            highlightIndex: idx,
-            totalCount: total,
-            startTimeSec: meta?.startTime ?? null,
-            endTimeSec: meta?.endTime ?? null,
-          });
-        }),
-      );
-    } catch {
-      /* swallow */
-    } finally {
-      setExporting(false);
-    }
-  }, [
+  const handleExport = useExportHandler({
+    activeVideo,
     selectedHighlightIds,
     deletedHighlightIds,
-    pollExportUntilReady,
-    activeVideo,
     videos,
-  ]);
+    pollExportUntilReady,
+    setExporting,
+    exportPollTimerRef,
+  });
 
   const hasVideos = videos.length > 0;
 
@@ -577,40 +429,7 @@ export function VideoUploader({
             description="Drag and drop basketball game videos to auto-detect made baskets, assists, steals and generate highlight clips."
           />
 
-          <section className="relative overflow-hidden border-b border-[var(--border)] rounded-2xl mb-2">
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-0 -z-10 opacity-60"
-              style={{
-                background:
-                  "radial-gradient(1200px 400px at 50% -10%, rgba(250,204,21,0.15), transparent 60%)",
-              }}
-            />
-            <div className="p-8 sm:p-10">
-              <span className="inline-flex items-center gap-2 rounded-full border border-[var(--primary)]/30 bg-[var(--primary)]/10 px-3 py-1 text-xs font-medium text-[var(--primary)]">
-                <span className="relative flex h-2 w-2">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--primary)] opacity-60" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--primary)]" />
-                </span>
-                Dev Mode · Local Preview (simulated upload progress, files stay
-                in browser)
-              </span>
-              <h1 className="mt-4 max-w-3xl text-3xl font-extrabold tracking-tight sm:text-4xl">
-                Turn your full-game footage into
-                <br />
-                <span className="bg-gradient-to-r from-[var(--primary)] to-[var(--accent)] bg-clip-text text-transparent">
-                  highlight clips in seconds
-                </span>
-              </h1>
-              <p className="mt-3 max-w-2xl text-base text-[var(--muted-foreground)] sm:text-lg">
-                Drag and drop any basketball game video (MP4 / MOV / MKV, etc.),
-                and the AI Worker will automatically detect events like
-                &quot;Made Basket, 3-pointer, Assist, Steal, Block&quot;,
-                generating individual clips for each moment plus a full-game
-                montage.
-              </p>
-            </div>
-          </section>
+          <HeroSection />
 
           <DropZone
             dragActive={dragActive}

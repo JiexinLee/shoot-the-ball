@@ -1,12 +1,12 @@
-export { VideoUploader } from "./VideoUploader";
-export type { VideoUploaderProps } from "./VideoUploader";
-export { VideoPreviewDialog } from "./VideoPreviewDialog";
-export type { VideoPreviewDialogProps } from "./VideoPreviewDialog";
+export { VideoUploader } from "./uploader/VideoUploader";
+export type { VideoUploaderProps } from "./uploader/VideoUploader";
+export { VideoPreviewDialog } from "./preview/VideoPreviewDialog";
+export type { VideoPreviewDialogProps } from "./preview/VideoPreviewDialog";
 export { VideoPlayer } from "./VideoPlayer";
-export { UploadWorkflowDialog } from "./UploadWorkflowDialog";
-export type { UploadWorkflowDialogProps } from "./UploadWorkflowDialog";
-export { VideoCalibrationStage } from "./VideoCalibrationStage";
-export type { VideoCalibrationStageProps } from "./VideoCalibrationStage";
+export { UploadWorkflowDialog } from "./upload-workflow/UploadWorkflowDialog";
+export type { UploadWorkflowDialogProps } from "./upload-workflow/UploadWorkflowDialog";
+export { VideoCalibrationStage } from "./calibration/VideoCalibrationStage";
+export type { VideoCalibrationStageProps } from "./calibration/VideoCalibrationStage";
 
 export { DropZone } from "./upload/DropZone";
 export { UploadQueue } from "./upload/UploadQueue";

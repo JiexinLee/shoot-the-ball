@@ -8,18 +8,9 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import {
-  UploadCloud,
-  Video,
-  Gauge,
-  AlertTriangle,
-  CheckCircle2,
-  X,
-} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { AlertTriangle, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatBytes, formatDuration } from "@/lib/format";
 import type { UploadedVideo } from "@/lib/types";
@@ -32,9 +23,9 @@ import {
   uploadToPresignedUrl,
 } from "@/lib/api-client";
 import { videos, type CalibrationInput } from "@/lib/api/videos";
-import { VideoCalibrationStage } from "./VideoCalibrationStage";
-
-type DialogStage = "uploading" | "calibrating" | "finalizing";
+import { VideoCalibrationStage } from "../calibration/VideoCalibrationStage";
+import { StageSteps, type DialogStage } from "./components/StageSteps";
+import { UploadingStage } from "./components/UploadingStage";
 
 export interface UploadWorkflowDialogProps {
   open: boolean;
@@ -56,53 +47,6 @@ export interface UploadWorkflowDialogProps {
   }) => void;
   /** 如果用户取消（点 X 关掉 Dialog 且流程没开始），父组件可以把本地记录删掉 */
   onCancelled?: (localId: string) => void;
-}
-
-/* ---- small sub-component: 阶段进度 steps ---- */
-function StageSteps({ stage }: { stage: DialogStage }) {
-  const steps: { key: DialogStage; label: string; icon: typeof UploadCloud }[] =
-    [
-      { key: "uploading", label: "Upload", icon: UploadCloud },
-      { key: "calibrating", label: "Calibrate", icon: Gauge },
-      { key: "finalizing", label: "Start AI", icon: Video },
-    ];
-  const idx = steps.findIndex((s) => s.key === stage);
-  return (
-    <ol className="flex items-center gap-2">
-      {steps.map((s, i) => {
-        const done = i < idx;
-        const active = i === idx;
-        return (
-          <li key={s.key} className="flex items-center gap-2">
-            <Badge
-              variant={done ? "secondary" : active ? "default" : "outline"}
-              className={cn(
-                "h-7 gap-1.5 text-xs",
-                done &&
-                  "bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/20",
-                active && "text-[var(--primary-foreground)]",
-              )}
-            >
-              {done ? (
-                <CheckCircle2 className="h-3.5 w-3.5" />
-              ) : (
-                <s.icon className="h-3.5 w-3.5" />
-              )}
-              {i + 1}. {s.label}
-            </Badge>
-            {i < steps.length - 1 && (
-              <span
-                className={cn(
-                  "h-px w-8",
-                  done ? "bg-emerald-500/60" : "bg-[var(--border)]",
-                )}
-              />
-            )}
-          </li>
-        );
-      })}
-    </ol>
-  );
 }
 
 /**
@@ -259,12 +203,12 @@ export function UploadWorkflowDialog({
       // finalizing 阶段正在发请求，不让用户手贱关
       return;
     }
+    // 已经在 calibrating，或者 videoId 已经拿到并上传过了：就不关本地记录，只关 Dialog 自己
     if (stage === "calibrating" || sessionVideoId) {
-      // 已经写了 DB，不要删，父组件保留记录，下次可以继续/重跑
       onOpenChange(false);
       return;
     }
-    // 还在上传初期且没拿到 session videoId → 允许取消记录
+    // 还在 uploading，没拿到 videoId：视为取消
     aborterRef.current?.abort();
     aborterRef.current = null;
     onCancelled?.(video.id);
@@ -273,17 +217,14 @@ export function UploadWorkflowDialog({
 
   const title = useMemo(() => {
     if (!video) return "Upload workflow";
-    return stage === "uploading"
-      ? "Uploading video"
-      : stage === "calibrating"
-        ? "Calibrate hoop & court"
-        : "Starting AI analysis";
+    if (stage === "uploading") return "Uploading video";
+    if (stage === "calibrating") return "Calibrate hoop & court";
+    return "Starting AI analysis";
   }, [video, stage]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        /* 🔥 强制 90vw / 90vh — 全部 !important 覆盖 shadcn 默认 sm:max-w-lg / p-6 / gap-4 */
         showCloseButton={false}
         className={cn(
           "!w-[90vw] !max-w-[90vw] !h-[90vh] !max-h-[90vh] !p-0 !gap-0 !rounded-2xl",
@@ -331,7 +272,7 @@ export function UploadWorkflowDialog({
           </Button>
         </DialogHeader>
 
-        {/* Body —— 留最小 padding，把空间让给视频预览 */}
+        {/* Body */}
         <div className="flex-1 min-h-0 p-2 sm:p-3">
           {!video ? (
             <div className="flex h-full items-center justify-center text-sm text-[var(--muted-foreground)]">
@@ -390,115 +331,5 @@ export function UploadWorkflowDialog({
         </div>
       </DialogContent>
     </Dialog>
-  );
-}
-
-/* ---- UploadingStage: 左预览（占主要空间） + 右进度面板 ---- */
-function UploadingStage({
-  video,
-  progress,
-  stageText,
-  error,
-}: {
-  video: UploadedVideo;
-  progress: number;
-  stageText: string;
-  error: string | null;
-}) {
-  return (
-    <div className="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[2.5fr_1fr]">
-      {/* Left: video preview — 直接顶到边框，用满左栏 2.5/3.5 ≈ 71% */}
-      <div className="flex min-h-0 flex-col rounded-xl border border-[var(--border)] bg-black overflow-hidden">
-        <div className="relative flex-1 min-h-0 flex items-center justify-center">
-          <video
-            src={video.previewUrl}
-            muted
-            playsInline
-            autoPlay={false}
-            controls
-            controlsList="nodownload nofullscreen"
-            className="h-full w-full object-contain"
-          />
-          {/* Upload progress overlay — 叠在视频下方 5%，不挡画面 */}
-          <div className="absolute left-3 right-3 bottom-3 space-y-1.5">
-            <div className="flex items-center justify-between text-[11px] text-white/90 font-medium tabular-nums drop-shadow">
-              <span>{stageText}</span>
-              <span>{progress}%</span>
-            </div>
-            <Progress
-              value={progress}
-              className="h-1.5 bg-white/10 [&>div]:bg-[var(--primary)]"
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Right: info panel */}
-      <div className="flex min-h-0 flex-col gap-3 overflow-auto">
-        <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-3">
-          <div className="flex items-center justify-between text-xs text-[var(--muted-foreground)]">
-            <span className="font-semibold text-[var(--foreground)] flex items-center gap-2">
-              <UploadCloud className="h-4 w-4 text-[var(--primary)]" />{" "}
-              {stageText}
-            </span>
-            <span className="font-mono tabular-nums">{progress}%</span>
-          </div>
-          <Progress value={progress} className="h-2" />
-          <div className="grid grid-cols-2 gap-2 text-[11px] text-[var(--muted-foreground)]">
-            <div>
-              <span className="block opacity-70">File</span>
-              <p className="truncate text-[var(--foreground)] font-medium">
-                {video.name}
-              </p>
-            </div>
-            <div>
-              <span className="block opacity-70">Size</span>
-              <p className="text-[var(--foreground)] font-medium">
-                {formatBytes(video.sizeBytes)}
-              </p>
-            </div>
-            <div>
-              <span className="block opacity-70">Duration</span>
-              <p className="text-[var(--foreground)] font-medium">
-                {formatDuration(video.durationSec) ?? "—"}
-              </p>
-            </div>
-            <div>
-              <span className="block opacity-70">Resolution</span>
-              <p className="text-[var(--foreground)] font-medium">
-                {video.width && video.height
-                  ? `${video.width}×${video.height}`
-                  : "—"}
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {error ? (
-          <Alert variant="destructive">
-            <AlertTriangle className="h-4 w-4" />
-            <AlertTitle className="ml-2 text-xs font-semibold">
-              Upload failed
-            </AlertTitle>
-            <AlertDescription className="ml-6 mt-1 text-xs">
-              {error}. Close the dialog and retry dropping the file.
-            </AlertDescription>
-          </Alert>
-        ) : (
-          <Alert className="border-emerald-500/40 bg-emerald-500/5">
-            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-            <AlertTitle className="ml-2 text-xs font-semibold">
-              What happens next
-            </AlertTitle>
-            <AlertDescription className="ml-6 mt-1 text-xs leading-relaxed">
-              Once upload completes you will mark the hoop / court position
-              (calibration), then we queue the video for AI analysis. After
-              that, this modal closes and you wait on the main page while the
-              highlights are being detected.
-            </AlertDescription>
-          </Alert>
-        )}
-      </div>
-    </div>
   );
 }
