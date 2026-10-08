@@ -395,3 +395,122 @@ poetry run python tests/scripts/benchmark.py --fixtures tests/fixtures/annotatio
 poetry run python tests/scripts/export_local_highlights.py \
   --input ../../assets/testing-video.MP4 --json ./tmp_out/highlights.json --out ./tmp_out_clips
 ```
+
+---
+
+## 9. 最简易版：直接跑 `detect.py` 验证 YOLO 是否能跑通
+
+> 不想启动 8 阶段 Pipeline / 不需要 Redis / API 等任何 infra？只想验证「我这台 Mac 的 MPS 能不能跑 YOLOv8，以及它到底认不认识篮球」？
+> 用 `detect.py` 独立脚本：读视频 → 抽帧 → YOLOv8 → 输出 `[{time, x, y, w, h, label, confidence}]`。
+> 脚本会在 stderr 打印 **全局检测类别统计**，一眼就能知道到底是「YOLO 坏了」还是「YOLO 不认识小篮球」。
+
+### 9.1 它到底在检测什么？
+
+COCO 80 类里**没有单独的 "basketball" 类**，只有一个通用的 `class 32 = "sports ball"`（篮球/足球/排球/网球… 都归这一类）。`detect.py` 默认只过滤 class 32。
+
+另外我们用的是 `yolov8n.pt`（**6 MB nano 模型**）——它对「大且清晰」的 person / car / chair 这种常见目标极准，但对「小 / 模糊 / 快速移动」的 sports ball 就非常弱，经常要把 `--conf` 降到 `0.05` 甚至更低才能看到检测框。
+
+所以**第一次不要直接跑篮球**，用下面的三步排查法：
+
+| Step         | 目的                                                                    | 命令                                                    |
+| ------------ | ----------------------------------------------------------------------- | ------------------------------------------------------- |
+| **Step 0**   | 先验证 YOLO 真的能在你机器上跑通（person=class 0 是 nano 模型最强的类） | `--classes person --conf 0.3 --sample-every 30`         |
+| **Step 1**   | 再跑篮球，**conf 放到极低**（nano 模型需要）                            | `--classes ball --conf 0.05 --sample-every 2`           |
+| **Step 1.5** | 仍然空？换更大一档的权重再试（比调 conf 更有效）                        | 加 `--model yolov8s.pt`，最高 `yolov8m.pt`              |
+| **Step 2**   | 还空？直接看 YOLO 到底看到了什么                                        | `--classes all --conf 0.05 --sample-every 30 --verbose` |
+
+Step 0 返回了 person → 说明 YOLO / 视频 / 推理都没问题，只是篮球太小 nano 模型没检出来，正常。
+Step 0 也全空 → 才是真的「环境 / 模型 / 视频读帧」有问题。
+
+> **fish shell 踩坑提醒**：如果你用 `\` 拆成多行命令，**每一行末尾的 `\` 后面不能有空格，且每一行（除了最后一行）都必须有 `\`**。少了一行 `\` 就会像 `fish: Unknown command: -o` 那样把下一行当成独立命令。稳妥做法是先不拆行，整条命令写一行执行。
+
+### 9.2 为什么不用改 `pyproject.toml`
+
+`detect.py` 用到的第三方依赖 **已经全部** 在 `[tool.poetry.dependencies]` 里声明好了：
+
+| `detect.py` import | pyproject.toml 对应行          |
+| ------------------ | ------------------------------ |
+| `cv2`              | `opencv-python-headless` (L20) |
+| `torch`            | `torch` (L25, macOS 会装)      |
+| `tqdm`             | `tqdm` (L23)                   |
+| `ultralytics.YOLO` | `ultralytics` (L22)            |
+
+`argparse / json / sys / pathlib / collections` 都是 Python 标准库。只要你之前跑过 `poetry install`，直接就能用，**零改动**。
+
+### 9.3 三步法 · 跑一遍示例视频
+
+仓库里已经放了一个测试视频：`../../assets/testing-video.MP4`（相对 `services/ai-worker/`）。
+
+```bash
+cd services/ai-worker
+
+# ── Step 0：确认 YOLO 真的能检测到东西 ─────────────────────────────
+# 每 30 帧（≈1 秒）采 1 帧，只检测人。 输出应该非常稳定地有几十条。
+# （建议先写一行，等熟悉命令再拆多行）
+poetry run python detect.py -i ../../assets/testing-video.MP4 --classes person --conf 0.3 --sample-every 30 -o ./people.json
+
+# ── Step 1：再跑篮球（关键是把 conf 降下来）────────────────────────
+poetry run python detect.py -i ../../assets/testing-video.MP4 --classes ball --conf 0.05 --sample-every 2 -o ./balls.json
+
+# ── Step 1.5：还空？换更大一档的 YOLO 权重再试 ─────────────────────
+# yolov8s.pt ~22MB，比 nano 明显更擅长小目标；必要时再到 yolov8m.pt (~95MB)
+poetry run python detect.py -i ../../assets/testing-video.MP4 --classes ball --conf 0.05 --sample-every 2 --model yolov8s.pt -o ./balls_s.json
+poetry run python detect.py -i ../../assets/testing-video.MP4 --classes ball --conf 0.05 --sample-every 2 --model yolov8m.pt -o ./balls_m.json
+
+# ── Step 2：还空？看 YOLO 在这个视频里到底能看到什么类 ───────────────
+# 加 --verbose 会每采一帧都把该帧的类别直方图打到 stderr
+poetry run python detect.py -i ../../assets/testing-video.MP4 --classes all --conf 0.05 --sample-every 30 --verbose -o ./all_classes.json
+```
+
+跑任意命令后重点看 stderr 尾部两行：
+
+```
+[INFO] All classes seen by YOLO (counts): {'person': 188, 'sports ball': 12, 'bottle': 4}
+[INFO] Target-class detections kept: 12
+```
+
+- `counts` 里根本没有 `sports ball` → 是「nano 模型不认识这个视频里的篮球」，**不是脚本的 bug**
+- `counts` 全是空 → 是「模型没加载 / 视频读不出帧 / MPS 失败」，回到 Step 0 排查
+
+### 9.4 输出格式示例
+
+```json
+[
+  {
+    "time": 12.4,
+    "x": 532,
+    "y": 311,
+    "w": 34,
+    "h": 36,
+    "class": 32,
+    "label": "sports ball",
+    "confidence": 0.12
+  }
+]
+```
+
+- `time`：秒（`frame_idx / fps`，保留 4 位小数）
+- `x, y`：bbox 中心点的**绝对像素坐标**（原始视频分辨率）
+- `w, h`：bbox 的宽高（像素，debug 时可以看球是不是太小，比如 w<20 基本就是 nano 漏检重灾区）
+- `class / label`：COCO class id + 可读名字（用 `--classes all` 时能区分到底检出了啥）
+- `confidence`：YOLO 单帧置信度（0~1，4 位小数）
+
+### 9.5 所有 CLI 参数一览
+
+```bash
+poetry run python detect.py --help
+#
+#   --input,  -i   <str>      输入视频路径（必填）
+#   --sample-every, -s <int>  每 N 帧取 1 帧做推理，默认 5
+#   --conf,   -c   <float>    YOLO 置信度阈值，默认 0.25
+#                                跑 ball 强烈建议降到 0.05~0.1
+#   --classes      <str>      目标类别过滤（默认 "ball"）：
+#                                "ball"   → COCO class 32 (sports ball)
+#                                "person" → COCO class 0
+#                                "all"    → 全部 80 类
+#                                "0,32"   → 手写逗号分隔 COCO id
+#   --model,   -m   <str>    YOLOv8 权重文件名 / 本地路径，默认 yolov8n.pt
+#                                常用：yolov8n.pt (6MB) / yolov8s.pt (22MB) / yolov8m.pt (95MB)
+#   --output, -o   <str>      输出 JSON 路径，默认 stdout
+#   --verbose, -v              每采样帧打印该帧 YOLO 类别直方图到 stderr
+```
