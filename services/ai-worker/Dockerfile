@@ -2,7 +2,7 @@
 # Python AI Worker
 # Build context: monorepo root (./)
 # =====================================================
-FROM python:3.11-slim AS builder
+FROM python:3.15-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -34,7 +34,7 @@ RUN poetry install --no-root --only main
 COPY services/ai-worker/app ./app
 RUN poetry install --only main
 
-FROM python:3.11-slim AS runner
+FROM python:3.15-slim AS runner
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/usr/local/bin:$PATH"
