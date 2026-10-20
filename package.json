@@ -41,11 +41,11 @@
     "build:contracts": "pnpm --filter @shoot-the-ball/contracts build"
   },
   "devDependencies": {
-    "turbo": "^2.0.0",
-    "typescript": "^5.4.0",
+    "turbo": "^2.11.9",
+    "typescript": "^7.0.2",
     "@types/node": "^20.11.0",
-    "eslint": "^8.56.0",
-    "prettier": "^3.2.0"
+    "eslint": "^10.13.0",
+    "prettier": "^3.9.10"
   },
   "engines": {
     "node": ">=20.0.0",
